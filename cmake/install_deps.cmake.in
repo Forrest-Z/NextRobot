@@ -1,0 +1,64 @@
+# install_deps must use with following command
+#install(CODE [[ set(__install_target $<TARGET_FILE:fruit_greet>) ]]  )
+
+    if(  DEFINED catkin_package)
+        install(CODE
+                [[
+        set(__install_bin_destination ${CATKIN_PACKAGE_BIN_DESTINATION})
+        set(__install_lib_destination ${CATKIN_PACKAGE_LIB_DESTINATION})
+
+        ]]
+                )
+        install(TARGETS ${INSTALL_DEPS_TARGET}
+                RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+                )
+        message(install_deps install_bin_destination : ${CATKIN_PACKAGE_BIN_DESTINATION})
+        message(install_deps install_lib_destination : ${CATKIN_PACKAGE_LIB_DESTINATION})
+    else()
+        install(CODE
+                [[
+        set(__install_bin_destination ${CMAKE_INSTALL_PREFIX}/bin)
+        set(__install_lib_destination ${CMAKE_INSTALL_PREFIX}/lib)
+        ]]
+                )
+        install(TARGETS ${INSTALL_DEPS_TARGET} DESTINATION bin)
+
+        message(install_deps install_bin_destination : ${CMAKE_INSTALL_PREFIX}/bin)
+        message(install_deps install_lib_destination : ${CMAKE_INSTALL_PREFIX}/lib)
+
+    endif()
+
+
+    install(CODE [[
+
+  file(GET_RUNTIME_DEPENDENCIES
+
+    EXECUTABLES $<TARGET_FILE:${INSTALL_DEPS_TARGET}>
+    RESOLVED_DEPENDENCIES_VAR _r_deps
+    PRE_EXCLUDE_REGEXES "usr.*"
+    POST_EXCLUDE_REGEXES "^/(usr|lib).*"
+    UNRESOLVED_DEPENDENCIES_VAR _u_deps
+    DIRECTORIES ${MY_DEPENDENCY_PATHS}
+  )
+  message("\n\n    Found dependencies :")
+
+  foreach(dep_filename ${_r_deps})
+  message("-- ${dep_filename}")
+
+      if (IS_ABSOLUTE ${dep_filename})
+
+        endif()
+       file(INSTALL
+              DESTINATION "${__install_lib_destination}"
+              TYPE SHARED_LIBRARY
+              FOLLOW_SYMLINK_CHAIN
+              FILES "${dep_filename}"
+            )
+  endforeach()
+  list(LENGTH _u_deps _u_length)
+  if("${_u_length}" GREATER 0)
+    message(WARNING "Unresolved dependencies detected!")
+  endif()
+
+  unset(__install_target)
+]])

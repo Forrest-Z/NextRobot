@@ -1,0 +1,7 @@
+# Get definition of 'find_dependency' macro
+include(CMakeFindDependencyMacro)
+# Find Eigen3. This will create 'Eigen3::Eigen' target
+find_dependency(Eigen3)
+
+# Include CMake-generated config file for the 'smalllib' target
+# which uses 'Eigen3::Eigen' target.
