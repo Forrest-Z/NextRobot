@@ -12,6 +12,8 @@ set(CMAKE_CXX_STANDARD  14)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 
+
+
 # 设置生成的安装包名字
 set(CPACK_PACKAGE_NAME ${PROJECT_NAME})
 # 设置支持指定安装目录的控制为 ON
@@ -242,10 +244,9 @@ build_external_project(mosquitto lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mos
 set(mosquitto_LIBRARY ${mosquitto_ROOT}/lib/libmosquitto.so ${mosquitto_ROOT}/lib/libmosquittopp.so)
 set(mosquitto_INCLUDE_DIR ${mosquitto_ROOT}/include)
 
-add_executable(scan_republisher src/scan_republisher.cpp ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-base64/cpp_base64.cpp src/message/MqttClient.cpp  )
-target_link_libraries(scan_republisher PUBLIC  ${catkin_LIBRARIES}  ${OpenCV_LIBS} ${mosquitto_LIBRARY} ) # X11 pthread
-target_compile_options( scan_republisher PUBLIC   ) #-Dcimg_display=0
-target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-base64 ${OpenCV_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
+add_executable(scan_republisher src/scan_republisher.cpp src/message/MqttClient.cpp)
+target_link_libraries(scan_republisher PUBLIC  ${catkin_LIBRARIES} ${mosquitto_LIBRARY} ) 
+target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
 
 
 
