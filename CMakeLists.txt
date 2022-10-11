@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
+cmake_policy(SET CMP0074 NEW)
 project(scan_republisher)
 
 
@@ -244,12 +245,19 @@ build_external_project(mosquitto lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mos
 set(mosquitto_LIBRARY ${mosquitto_ROOT}/lib/libmosquitto.so ${mosquitto_ROOT}/lib/libmosquittopp.so)
 set(mosquitto_INCLUDE_DIR ${mosquitto_ROOT}/include)
 
+#build_external_project(tinyxml2 lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinyxml2-9.0.0.tar.gz  -DCMAKE_BUILD_TYPE=Release  )
+#find_package(tinyxml2 REQUIRED)
+# tinyxml2::tinyxml2
+
+
 add_executable(scan_republisher src/scan_republisher.cpp src/message/MqttClient.cpp)
 target_link_libraries(scan_republisher PUBLIC  ${catkin_LIBRARIES} ${mosquitto_LIBRARY} ) 
 target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
 
-
-
+add_executable(scan_filter_intensity src/scan_filter_intensity.cpp)
+target_link_libraries(scan_filter_intensity PUBLIC  ${catkin_LIBRARIES}  )
+target_include_directories(scan_filter_intensity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
+set_asan(scan_filter_intensity)
 
 set(shared_dirs ${mosquitto_ROOT}/lib )
 foreach(dir ${shared_dirs})

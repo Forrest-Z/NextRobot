@@ -23,7 +23,7 @@
 #include "message/MqttClient.h"
 
 
-#include "json.hpp"
+#include "nlohmann/json.hpp"
 
 #include "common/signal_handler.h"
 #include "../include/common/signal_handler.h"
@@ -194,7 +194,40 @@ struct Transform2d{
         }
 
     }
+    Transform2d operator*(const Transform2d& rhv )const{
+        Transform2d transform;
+        auto & mat  =this->matrix;
+        auto & mat_rhv  =rhv.matrix;
+        auto & mat_mul  =transform.matrix;
+        for(int i = 0; i < 3; i++){
+            for(int j = 0; j < 3; j++)
+                mat_mul[i][j] += mat[i][j] * mat_rhv[j][i] ;
+        }
 
+        return transform;
+
+    }
+    Transform2d inverse() const{
+        Transform2d transform_inv;
+        float determinant = 0;
+
+        auto & mat  =this->matrix;
+        //finding determinant
+        for(int i = 0; i < 3; i++)
+            determinant += (mat[0][i] * (mat[1][(i+1)%3] * mat[2][(i+2)%3] - mat[1][(i+2)%3] * mat[2][(i+1)%3]));
+
+        auto & mat_inv  =transform_inv.matrix;
+        float determinant_inv = 1.0f/determinant;
+
+        for(int i = 0; i < 3; i++){
+            for(int j = 0; j < 3; j++)
+                mat_inv[i][j]= ((mat[(j+1)%3][(i+1)%3] * mat[(j+2)%3][(i+2)%3]) - (mat[(j+1)%3][(i+2)%3] * mat[(j+2)%3][(i+1)%3]))* determinant_inv ;
+
+        }
+
+        return transform_inv;
+
+    }
 
 };
 std::ostream& operator <<(std::ostream& out,const Transform2d& rhv ){
@@ -277,6 +310,17 @@ struct ScanToPoints{
 
     }
 
+    void getGlobalPoints(){
+
+        int N= global_xy_points_vec.size();
+
+        for(int i = 0 ; i < N ;i++){
+            global_xy_points_vec[i][0] = local_xy_points[i+i];
+            global_xy_points_vec[i][1] = local_xy_points[i+i+1];
+        }
+
+    }
+
 
             };
 
@@ -285,7 +329,7 @@ int main(int argc, char **argv) {
 
 
     //==== ros
-    ros::init(argc, argv, "map_republisher");
+    ros::init(argc, argv, "scan_republisher");
     ros::NodeHandle nh;
     ros::NodeHandle nh_private("~");
 
@@ -316,12 +360,16 @@ int main(int argc, char **argv) {
     std::string laser_param = "message";
     std::string returnTime_param = "returnTime";
 
+    std::string fixed_frame = "/map";
+    std::string fixed_frame_param = "fixed_frame";
+
 
     getParam(map_name_param, map_name);
     getParam(agv_sn_param, agv_sn);
     getParam(mqtt_server_ip_param, mqtt_server_ip);
     getParam(mqtt_server_port_param, mqtt_server_port);
     getParam(mqtt_topic_qos_param, mqtt_topic_qos);
+    getParam(fixed_frame_param, fixed_frame);
 
 
     std::string mqtt_topic = "agv/laser/ret/" + agv_sn;
@@ -332,6 +380,7 @@ int main(int argc, char **argv) {
     std::cout << mqtt_server_ip_param << " : " << mqtt_server_ip << std::endl;
     std::cout << mqtt_server_port_param << " : " << mqtt_server_port << std::endl;
     std::cout << mqtt_topic_qos_param << " : " << mqtt_topic_qos << std::endl;
+    std::cout << fixed_frame_param << " : " << fixed_frame << std::endl;
 
     std::cout << "mqtt_topic" << " : " << mqtt_topic << std::endl;
 
@@ -400,8 +449,6 @@ int main(int argc, char **argv) {
 
     ROS_INFO("Waiting for tf transform.");
 
-    std::string map_frame = "/map";
-    std::string laser_frame = "/base_laser";
 
     ScanToPoints scan_handler;
     Transform2d transform2D;
@@ -415,22 +462,32 @@ int main(int argc, char **argv) {
 
         // get time
         // lookup tf
-        try {
-            tl_.waitForTransform(map_frame, msg->header.frame_id, ros::Time(0), ros::Duration(10.0));
-            tl_.lookupTransform(map_frame, msg->header.frame_id, ros::Time(0), transform);
-            transform_.setOrigin(transform.getOrigin());
-            transform_.setRotation(transform.getRotation());
+        if(fixed_frame != msg->header.frame_id){
+            try {
+                tl_.waitForTransform(fixed_frame, msg->header.frame_id, ros::Time(0), ros::Duration(10.0));
+                tl_.lookupTransform(fixed_frame, msg->header.frame_id, ros::Time(0), transform);
+                transform_.setOrigin(transform.getOrigin());
+                transform_.setRotation(transform.getRotation());
+                tf_transform_received = true;
+                ROS_INFO("Received tf transform.");
+                tf_transform_received = true;
+                scan_handler.getGlobalPoints(transform_.getOrigin().x(),transform_.getOrigin().y(),  tf::getYaw(transform_.getRotation()));
+
+            }
+            catch (tf::TransformException& ex) {
+                ROS_ERROR("%s", ex.what());
+//            ros::Duration(1.0).sleep();
+                tf_transform_received = false;
+            }
+
+
+
+        }else{
             tf_transform_received = true;
-            ROS_INFO("Received tf transform.");
-            tf_transform_received = true;
-            scan_handler.getGlobalPoints(transform_.getOrigin().x(),transform_.getOrigin().y(),  tf::getYaw(transform_.getRotation()));
+            scan_handler.getGlobalPoints();
 
         }
-        catch (tf::TransformException ex) {
-            ROS_ERROR("%s", ex.what());
-//            ros::Duration(1.0).sleep();
-            tf_transform_received = false;
-        }
+
 
         // transform points
 
