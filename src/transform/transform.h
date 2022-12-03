@@ -11,7 +11,7 @@
 
 namespace transform{
     struct Transform2d{
-        float matrix[3][3] = {};
+        std::array<std::array<float,3>,3> matrix;
         Transform2d(float x=0.0, float y=0.0,float yaw=0.0){
             set(x,y,yaw);
         }
@@ -35,6 +35,18 @@ namespace transform{
             matrix[2][2]  = 1.0;
 
         }
+
+        float x() const {
+            return matrix[0][2];
+        }
+        float y() const {
+            return matrix[1][2];
+        }
+        float yaw() const {
+            return atan2(matrix[1][0],matrix[0][0]);
+        }
+
+
         Transform2d operator*(const Transform2d& rhv){
             Transform2d result;
 
@@ -89,10 +101,17 @@ namespace transform{
 
             float *p_x = &(result[0]);
             float *p_y = p_x + n_dim;
+//            std::cout << "tf, tx = " << tx << ", ty = " << ty << std::endl;
+
+//            std::cout << "tf, r00 = " << r00 << ", r01 = " << r01 << ", r10 = " << r10  << ", r11 = " << r11 << std::endl;
+
 
             for (int i = 0; i < n_dim; i++) {
                 p_x[i + i] = r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx;
                 p_x[i + i + 1] = r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty;
+//                std::cout << "== i = " << i << std::endl;
+//                std::cout << "== tf p_x = " << p_data_x[i+i] << ", p_y = " << p_data_x[i + i + 1] << std::endl;
+//                std::cout << "== tf d_x = " << r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx << ", d_y = " << r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty << std::endl;
             }
 
         }
@@ -138,7 +157,9 @@ namespace transform{
         out.precision(5);
         out.setf( std::ios::fixed, std:: ios::floatfield ); // floatfield set to fixed
 
-        out << "[" << rhv.matrix[0][0] << ", " << rhv.matrix[0][1] << ", " << rhv.matrix[0][2]<<"\n"
+        out << "x-y-yaw:\n[ " << rhv.x() << ", " << rhv.y() << ", " << rhv.yaw() << " ]\n";
+
+        out << "matrix:\n[" << rhv.matrix[0][0] << ", " << rhv.matrix[0][1] << ", " << rhv.matrix[0][2]<<"\n"
             << " " << rhv.matrix[1][0] << ", " << rhv.matrix[1][1] << ", " << rhv.matrix[1][2]<<"\n"
             <<" " << rhv.matrix[2][0] << ", " << rhv.matrix[2][1] << ", " << rhv.matrix[2][2]<<"]\n"
             << std::endl;

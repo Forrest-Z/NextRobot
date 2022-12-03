@@ -257,13 +257,12 @@ struct ScanToPoints{
     Transform2d transform2D;
 
     bool init_done = false;
-    void getLocalPoints( const sensor_msgs::LaserScanConstPtr  & msg){
+    void getLocalPoints( const sensor_msgs::LaserScanConstPtr  & msg,float range_max){
         if(init_done){
 
             auto ranges =  std::remove_const_t<std::vector<float>>(msg->ranges)  ;
             auto intensities = msg->intensities;
 
-            auto range_max = msg->range_max +1;
 
             func_map_v4([&](auto&a){
                 a = std::isnormal(a) ? a:range_max ;
@@ -271,7 +270,7 @@ struct ScanToPoints{
 
             for(int i = 0 ; i < ranges.size();i++){
                 local_xy_points[i+i] = ranges[i]*cos_angle_buffer[i];
-                local_xy_points[i+i +1] = ranges[i]*sin_angle_buffer[1];
+                local_xy_points[i+i +1] = ranges[i]*sin_angle_buffer[i];
 
             }
             if(intensities.size() == ranges.size()){
@@ -340,7 +339,7 @@ int main(int argc, char **argv) {
     int mqtt_topic_qos = 0;
     std::string mqtt_user_name = "user_1";
     std::string mqtt_passward = "user_1";
-    std::string mqtt_client_id = "agv-";
+    std::string mqtt_client_id = "agv-scan-";
     std::string mqtt_will_topic;
     std::string mqtt_will_message;
     int mqtt_keep_alive = 5;
@@ -363,6 +362,9 @@ int main(int argc, char **argv) {
     std::string fixed_frame = "/map";
     std::string fixed_frame_param = "fixed_frame";
 
+    float range_max = 30.0;
+    std::string range_max_param = "range_max";
+
 
     getParam(map_name_param, map_name);
     getParam(agv_sn_param, agv_sn);
@@ -370,6 +372,7 @@ int main(int argc, char **argv) {
     getParam(mqtt_server_port_param, mqtt_server_port);
     getParam(mqtt_topic_qos_param, mqtt_topic_qos);
     getParam(fixed_frame_param, fixed_frame);
+    getParam(range_max_param, range_max);
 
 
     std::string mqtt_topic = "agv/laser/ret/" + agv_sn;
@@ -457,7 +460,7 @@ int main(int argc, char **argv) {
 
     auto cb = [&]( const sensor_msgs::LaserScanConstPtr &msg) {
 
-        scan_handler.getLocalPoints(msg);
+        scan_handler.getLocalPoints(msg,range_max);
 
 
         // get time

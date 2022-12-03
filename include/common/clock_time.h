@@ -12,6 +12,10 @@
 #include <iostream>
 #include <vector>
 #include <tuple>
+#include <ctime>
+#include <iostream>
+#include <iterator>
+#include <locale>
 
 
 namespace common {
@@ -178,6 +182,12 @@ namespace common {
                 .count();
     }
 
+    // Returns the given duration in seconds.
+    double ToMicroSeconds(Duration duration){
+        return std::chrono::duration_cast<std::chrono::microseconds>(duration)
+                .count();
+    }
+
 // Creates a time from a Universal Time Scale.
     Time FromUniversal(int64 ticks) { return Time(Duration(ticks)); }
 
@@ -201,15 +211,15 @@ namespace common {
         return common::FromUniversal(integral_duration );
     }
 
-    // Get current date/time, format is YYYY-MM-DD HH:mm:ss, format = "%Y-%m-%d %X"
-    std::string getCurrentDateTime(char* format ) {
+    // Get current date/time, format is YYYY-MM-DD HH:mm:ss, format = "%Y-%m-%d %X" or "%Y-%m-%d-%H-%M-%S"
+    std::string getCurrentDateTime(const std::string & format = "%Y-%m-%d %X") {
         time_t     now = time(0);
         struct tm  tstruct;
         char       buf[80];
         tstruct = *localtime(&now);
         // Visit http://en.cppreference.com/w/cpp/chrono/c/strftime
         // for more information about date/time format
-        strftime(buf, sizeof(buf), format, &tstruct);
+        strftime(buf, sizeof(buf), format.c_str(), &tstruct);
 
         return buf;
     }

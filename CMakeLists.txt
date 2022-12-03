@@ -46,6 +46,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   sensor_msgs
   tf
+  interactive_markers
 )
 
 ## System dependencies are found with CMake's conventions
@@ -249,15 +250,41 @@ set(mosquitto_INCLUDE_DIR ${mosquitto_ROOT}/include)
 #find_package(tinyxml2 REQUIRED)
 # tinyxml2::tinyxml2
 
+build_external_project(Ceres lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ceres-solver-2.1.0.tar.gz  -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMINIGLOG=ON -DGFLAGS=OFF -DSUITESPARSE=OFF -DBUILD_EXAMPLES=OFF)
+find_package(Ceres  REQUIRED)
+message(Ceres_ROOT : ${Ceres_ROOT} ,CERES_LIBRARIES : ${CERES_LIBRARIES} )
+
+
+build_external_project(PCL lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pcl-pcl-1.12.1.tar.gz  -DCMAKE_BUILD_TYPE=Release  -DBUILD_examples=OFF -DBUILD_apps=OFF -DBUILD_global_tests=OFF -DBUILD_simulation=OFF)
+find_package(PCL REQUIRED)
+
+#octomap-1.9.6.tar.gz
+build_external_project(octomap lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/octomap-1.9.6.tar.gz  -DCMAKE_BUILD_TYPE=Release  -DBUILD_OCTOVIS_SUBPROJECT=OFF -DBUILD_DYNAMICETD3D_SUBPROJECT=OFF)
+find_package(octomap REQUIRED)
+
 
 add_executable(scan_republisher src/scan_republisher.cpp src/message/MqttClient.cpp)
 target_link_libraries(scan_republisher PUBLIC  ${catkin_LIBRARIES} ${mosquitto_LIBRARY} ) 
 target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
 
 add_executable(scan_filter_intensity src/scan_filter_intensity.cpp)
-target_link_libraries(scan_filter_intensity PUBLIC  ${catkin_LIBRARIES}  )
+target_link_libraries(scan_filter_intensity PUBLIC  ${catkin_LIBRARIES}  ${CERES_LIBRARIES})
 target_include_directories(scan_filter_intensity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
-set_asan(scan_filter_intensity)
+
+
+find_package (Eigen3 REQUIRED NO_MODULE)
+
+add_library(pcl_norm_2d src/icp/PCA2D.cpp src/icp/Normal2dEstimation.cpp)
+target_include_directories( pcl_norm_2d PUBLIC  ${EIGEN3_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include  ${CMAKE_SOURCE_DIR}/third_party/nlohmann  ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+
+
+
+
+
+add_executable(scan_matching src/scan_matching.cpp)
+target_include_directories(scan_matching PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+
+target_link_libraries(scan_matching PUBLIC pcl_norm_2d ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
 
 set(shared_dirs ${mosquitto_ROOT}/lib )
 foreach(dir ${shared_dirs})

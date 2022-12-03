@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="mqtt_server_ip"     default="127.0.0.1"/>
+
+    <arg name="agvSn"     default="agv-01"/>
+    <arg name="use_sim_time" value="true"/>
+
+    <arg name="pub_tf_static" default="false"/>
+
+    <group if="$(arg pub_tf_static)">
+        <!-- stuff that will only be evaluated if foo is true -->
+        <node pkg="tf2_ros" type="static_transform_publisher" name="base_footprint_base_link" args="0 0 0 0 0 0 1 base_footprint base_link" />
+        <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_base_laser" args="0.85 0 0 0 0 0 1 base_link base_laser" />
+    </group>
+
+
+    <param name="use_sim_time"    value="$(arg use_sim_time)"/>
+
+    <node name="rviz_scan_matching" pkg="rviz" type="rviz" required="false"
+          args="-d $(find scan_republisher)/launch/scan_matching.rviz">
+
+        <param name="use_sim_time"    value="$(arg use_sim_time)"/>
+
+
+    </node>
+
+    <node name="scan_matching" pkg="scan_republisher" type="scan_matching" output="screen">
+        <param name="use_sim_time"    value="$(arg use_sim_time)"/>
+
+        <param name="mode" value="map"/>
+        <param name="dump_data" value="false"/>
+
+        <param name="file_dir" value="$(find scan_republisher)/launch/data"/>
+        <param name="load_dir" value="2022-12-04-03-27-37"/>
+
+
+        <!-- detect_free or detect_free_init -->
+        <param name="range_max" value="30.0"/>
+        <param name="range_min" value="0.5"/>
+
+        <param name="pcl_voxel_leaf_x" value="0.04"/>
+        <param name="pcl_voxel_leaf_y" value="0.04"/>
+        <param name="pcl_voxel_leaf_z" value="0.2"/>
+        <param name="pcl_radius_neighbors" value="3"/>
+        <param name="pcl_radius_radiusSearch" value="0.2"/>
+
+        <param name="pcl_ref_voxel_leaf_x" value="0.08"/>
+        <param name="pcl_ref_radius_radius" value="0.2"/>
+        <param name="pcl_ref_radius_neighbors" value="2"/>
+
+
+        <param name="pcl_icp_max_match_distance" value="0.2"/>
+
+        <param name="pcl_norm_radius" value="0.2"/>
+
+        <param name="scan_point_jump" value="0.1"/>
+        <param name="scan_noise_angle" value="0.15"/>
+
+        <param name="no_move_ms" value="1000.0"/>
+
+
+    </node>
+</launch>

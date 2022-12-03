@@ -1,0 +1,71 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="mqtt_server_ip"     default="127.0.0.1"/>
+
+  <arg name="agvSn"     default="agv-01"/>
+    <arg name="use_sim_time" value="true"/>
+
+    <arg name="pub_tf_static" default="false"/>
+
+    <group if="$(arg pub_tf_static)">
+        <!-- stuff that will only be evaluated if foo is true -->
+        <node pkg="tf2_ros" type="static_transform_publisher" name="base_footprint_base_link" args="0 0 0 0 0 0 1 base_footprint base_link" />
+        <node pkg="tf2_ros" type="static_transform_publisher" name="base_link_base_laser" args="0.85 0 0 0 0 0 1 base_link base_laser" />
+    </group>
+
+
+
+  <node name="rviz_scan_republisher" pkg="rviz" type="rviz" required="true"
+      args="-d $(find scan_republisher)/launch/scan_filter.rviz">
+
+      <param name="use_sim_time"    value="$(arg use_sim_time)"/>
+
+
+  </node>
+
+    <node name="laser_match" pkg="scan_republisher" type="scan_filter_intensity" output="screen">
+        <param name="use_sim_time"    value="$(arg use_sim_time)"/>
+
+        <!-- detect_free or detect_free_init -->
+        <param name="detect_mode" value="detect_free_init"/>
+
+
+        <param name="fixed_frame" value="/map"/>
+        <param name="scan_filter_radius" value="0.3"/>
+        <param name="min_intensity" value="1000.0"/>
+        <param name="min_light_num" value="5"/>
+        <param name="max_light_num" value="10"/>
+
+        <param name="calib_or_loc" value="false"/>
+        <param name="calib_file" value="$(find scan_republisher)/launch/calib.yaml"/>
+        <param name="CERES_SEQUENCE_NUM" value="2" />
+        <param name="run" value="true" />
+        <param name="status" value="0" />
+        <param name="tf_broadcast" value="true" />
+        <param name="solve_fail_time" value="-1.0" />
+        <param name="ceres_constrains_weight_x" value="1" />
+        <param name="ceres_constrains_weight_y" value="1" />
+        <param name="ceres_constrains_weight_yaw" value="1" />
+
+        <param name="ceres_fit_weight" value="1000.1" />
+        <param name="solve_interval" value="10.1" />
+
+
+
+        <rosparam param="marker_points_in_map2">
+        - [6.929 , 0.878, 600.0]
+        - [8.260 , 0.1010 , 600.0]
+        - [9.618 , 0.105 , 600.0]
+        </rosparam>
+        <rosparam param="marker_points_in_map">
+            - [8.261  , 0.101 , 600.0]
+            - [9.618  , 0.106 , 600.0]
+            - [6.930 , 0.878, 600.0]
+
+        </rosparam>
+
+        <rosparam param="marker_points_in_map_cluster">
+            [[[8.322047233581543,0.15736418962478638,1.9258614778518677,2887.0],[8.332271575927734,0.1635276973247528,1.925869107246399,35263.0],[8.341621398925781,0.17258024215698242,1.9258663654327393,35815.0],[8.35354232788086,0.1730266809463501,1.9258943796157837,35741.0],[8.366046905517578,0.17157906293869019,1.925929307937622,35128.0],[8.379143714904785,0.16824008524417877,1.9259710311889648,2308.0],[8.391963958740234,0.1658812165260315,1.9260092973709106,1122.0]],[[9.666437149047852,0.15527130663394928,1.9291743040084839,1072.0],[9.679713249206543,0.1561785489320755,1.9292043447494507,2234.0],[9.690353393554688,0.16249772906303406,1.9292125701904297,35004.0],[9.700098991394043,0.170626699924469,1.9292134046554565,35592.0],[9.712928771972656,0.17249387502670288,1.9292396306991577,35462.0],[9.728872299194336,0.16811303794384003,1.9292913675308228,3177.0],[9.743946075439453,0.16555514931678772,1.9293357133865356,1288.0],[9.757694244384766,0.16571038961410522,1.9293690919876099,854.0]],[[6.949242115020752,0.9314804077148438,1.9202821254730225,975.0],[6.959681034088135,0.9276449084281921,1.9203187227249146,1662.0],[6.969902038574219,0.9258124828338623,1.92034912109375,2476.0],[6.97907018661499,0.9329341650009155,1.9203513860702515,3283.0],[6.98833703994751,0.9390763640403748,1.9203566312789917,35960.0],[6.997465133666992,0.9462247490882874,1.9203587770462036,37163.0],[7.0075531005859375,0.9454464912414551,1.9203858375549316,37406.0]]]
+        </rosparam>
+    </node>
+</launch>
