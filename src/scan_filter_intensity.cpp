@@ -45,6 +45,8 @@
  */
 
 
+
+
 int main(int argc, char** argv){
 
     //==== ros
@@ -169,10 +171,183 @@ int main(int argc, char** argv){
 
     std::string detect_mode_param = "detect_mode";
 
-    std::array<float,3> pints;
+
+    std::deque<pose_solver::PointsToGrid> ceres_grid_vec;
+    std::deque< ceres::BiCubicInterpolator<pose_solver::PointsToGrid>> ceres_interpolator_vec;
+
+
+    visualization_msgs::MarkerArray marker_array_msg;
+    visualization_msgs::Marker  marker_msg;
+    marker_msg.header.frame_id = "map";//fixed_frame;
+    marker_msg.type = visualization_msgs::Marker::CYLINDER;
+    marker_msg.action = visualization_msgs::Marker::ADD;
+    marker_msg.pose.orientation.w = 1.0;
+    marker_msg.scale.x = 0.05;
+    marker_msg.scale.y = 0.05;
+    marker_msg.scale.z = 0.05;
+    marker_msg.header.stamp = ros::Time();
+    marker_msg.color.a = 0.5; // Don't forget to set the alpha!
+    marker_msg.color.r = 0.0;
+    marker_msg.color.g = 1.0;
+    marker_msg.color.b = 0.0;
+
+
+    ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("marker",10);
+
+
+
+    auto loadMarkerParam = [&]{
+        std::array<float,3> pints{0.0,0.0,0.0};
+        nh_private.getParam(marker_points_cluster_param,marker_points_cluster_xml);
+        nh_private.getParam(marker_param,marker_points_in_map);
+        nh_private.getParam(detect_mode_param,detect_mode);
+
+
+
+        {
+
+            std::cout << "get " << marker_points_cluster_param << "\n " << marker_points_cluster_xml.toXml() << std::endl;
+
+            auto t = marker_points_cluster_xml.getType();
+            if(t!= XmlRpc::XmlRpcValue::TypeArray){
+                std::cerr << "get " << marker_points_cluster_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << t <<marker_points_cluster_xml.toXml() << std::endl;
+                return 0;
+
+            }
+            int N= marker_points_cluster_xml.size();
+            marker_points_clusters.resize(N);
+
+            for(int i = 0 ; i < N ;i++ ){
+                marker_points_cluster.clear();
+
+                for(int j = 0 ; j < marker_points_cluster_xml[i].size(); j++){
+                    std::cout <<"check 1 :\n" <<marker_points_cluster_xml[i][j].toXml() << std::endl;
+
+
+                    int L = marker_points_cluster_xml[i][j].size()>3 ? 3:marker_points_cluster_xml[i][j].size();
+                    std::cout << "L = " << L << std::endl;
+
+#if 1
+                    for(int l = 0 ; l < L;l++){
+                        pints[l] = static_cast<double >(marker_points_cluster_xml[i][j][l]) ;
+
+                    }
+#endif
+                    marker_points_cluster.push_back(pints);
+
+
+                }
+
+
+
+
+                marker_points_clusters[i] =marker_points_cluster;
+            }
+        }
+
+        {
+            marker_points_in_map_xml_str = marker_points_in_map.toXml();
+            auto t = marker_points_in_map.getType();
+            if(t!= XmlRpc::XmlRpcValue::TypeArray){
+                std::cerr << "get " << marker_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << t <<marker_points_in_map_xml_str << std::endl;
+                return 0;
+
+            }
+
+            int N= marker_points_in_map.size();
+
+            N= marker_points_in_map.size();
+            marker_points.resize(N);
+            for(int i = 0; i < N;i++){
+                auto &e = marker_points_in_map[i];
+                if( e.getType()!= XmlRpc::XmlRpcValue::TypeArray){
+                    std::cerr << "get " << marker_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << e.getType() <<e.toXml() << std::endl;
+                    return 0;
+
+                }
+
+                int M = e.size()>3 ? 3:e.size();
+                for(int j = 0 ; j < M;j++){
+                    pints[j] = static_cast<double >(e[j]) ;
+                }
+                marker_points[i] =pints ;
+            }
+        }
+
+        {
+            ceres_grid_vec.clear();
+            ceres_interpolator_vec.clear();
+
+            for(int i = 0; i < marker_points_clusters.size();i++){
+                std::vector<float> points_for_grid;
+
+                std::cerr << " marker_points_clusters[i].size() = " << marker_points_clusters[i].size()<< std::endl;
+
+                points_for_grid.resize(marker_points_clusters[i].size() + marker_points_clusters[i].size());
+                for(int j = 0; j < marker_points_clusters[i].size(); j++){
+                    points_for_grid[j+j] = marker_points_clusters[i][j][0];
+                    points_for_grid[j+j+1] = marker_points_clusters[i][j][1];
+
+                }
+                std::cerr << " points_for_grid.size() = " << points_for_grid.size()<< std::endl;
+
+                ceres_grid_vec.emplace_back(points_for_grid);
+                ceres_interpolator_vec.emplace_back(ceres_grid_vec.back());
+
+            }
+
+        }
+
+
+        {
+            int marker_num = marker_points.size();
+            marker_array_msg.markers.resize(marker_num + marker_num,marker_msg);
+            for(int i = 0; i < marker_points.size();i++){
+                marker_array_msg.markers[i].type = visualization_msgs::Marker::CYLINDER;
+                marker_array_msg.markers[i].pose.position.x = marker_points[i][0];
+                marker_array_msg.markers[i].pose.position.y = marker_points[i][1];
+                marker_array_msg.markers[i].id = i;
+
+
+                marker_array_msg.markers[i+marker_num].type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+                marker_array_msg.markers[i+marker_num].pose.position.x = marker_points[i][0];
+                marker_array_msg.markers[i+marker_num].pose.position.y = marker_points[i][1];
+                marker_array_msg.markers[i+marker_num].id = i+marker_num;
+
+                char s[100];
+                sprintf(s, R"(%d : [%.3f,%.3f])",i, marker_points[i][0],marker_points[i][1]);
+                marker_array_msg.markers[i+marker_num].text = s;
+            }
+        }
+        return 1;
+
+    };
+
+    auto startDetectCallback = [&]{
+
+    };
+
+    auto stopDetectCallback = [&]{
+
+    };
+
+
+    auto detectOkCallback = [&]{
+
+        nh_private.setParam(amcl_tf_broadcast,false);
+
+    };
+
+    auto detectFailCallback = [&]{
+        nh_private.setParam(amcl_tf_broadcast,true);
+
+    };
+
+
+
+
 
     if (nh_private.hasParam(marker_param)){
-        nh_private.getParam(marker_param,marker_points_in_map);
         nh_private.getParam(scan_filter_radius_param,scan_filter_radius);
         nh_private.getParam(min_intensity_param,min_intensity);
         nh_private.getParam(min_light_num_param,min_light_num);
@@ -194,77 +369,12 @@ int main(int argc, char** argv){
 
         nh_private.getParam(solve_interval_param,solve_interval);
 
-        nh_private.getParam(detect_mode_param,detect_mode);
-
-
-        nh_private.getParam(marker_points_cluster_param,marker_points_cluster_xml);
-        {
-
-            std::cout << "get " << marker_points_cluster_param << "\n " << marker_points_cluster_xml.toXml() << std::endl;
-
-            auto t = marker_points_cluster_xml.getType();
-            if(t!= XmlRpc::XmlRpcValue::TypeArray){
-                std::cerr << "get " << marker_points_cluster_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << t <<marker_points_cluster_xml.toXml() << std::endl;
-                return 0;
-
-            }
-            marker_points_clusters.clear();
-            for(int i = 0 ; i <marker_points_cluster_xml.size();i++ ){
-                marker_points_cluster.clear();
-
-                for(int j = 0 ; j < marker_points_cluster_xml[i].size(); j++){
-                    std::cout <<"check 1 :\n" <<marker_points_cluster_xml[i][j].toXml() << std::endl;
-
-
-                    int L = marker_points_cluster_xml[i][j].size()>3 ? 3:marker_points_cluster_xml[i][j].size();
-                    std::cout << "L = " << L << std::endl;
-
-    #if 1
-                    for(int l = 0 ; l < L;l++){
-                        pints[l] = static_cast<double >(marker_points_cluster_xml[i][j][l]) ;
-
-                    }
-#endif
-                    marker_points_cluster.push_back(pints);
-
-
-                }
 
 
 
+        loadMarkerParam();
 
-                marker_points_clusters.push_back(marker_points_cluster);
-            }
-        }
-
-
-        marker_points_in_map_xml_str = marker_points_in_map.toXml();
-        auto t = marker_points_in_map.getType();
-         if(t!= XmlRpc::XmlRpcValue::TypeArray){
-             std::cerr << "get " << marker_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << t <<marker_points_in_map_xml_str << std::endl;
-             return 0;
-
-         }
-
-         int N= marker_points_in_map.size();
-         for(int i = 0; i < N;i++){
-             auto &e = marker_points_in_map[i];
-             if( e.getType()!= XmlRpc::XmlRpcValue::TypeArray){
-                 std::cerr << "get " << marker_param << " fail: " <<  "wrong type: XmlRpc::XmlRpcValue::TypeArray != " << e.getType() <<e.toXml() << std::endl;
-                 return 0;
-
-             }
-
-             int M = e.size()>3 ? 3:e.size();
-             for(int j = 0 ; j < M;j++){
-                 pints[j] = static_cast<double >(e[j]) ;
-             }
-             marker_points.emplace_back(pints);
-         }
-
-
-
-    }else{
+     }else{
         std::cerr << "get " << marker_param << " fail" << std::endl;
 
         return 0;
@@ -288,33 +398,11 @@ int main(int argc, char** argv){
     common::simple_cast(marker_points_flat_parameter, marker_points_array_2d);
     common::simple_cast(marker_points_parameter, marker_points);
 
-    std::vector<pose_solver::PointsToGrid> ceres_grid_vec;
-    std::vector< ceres::BiCubicInterpolator<pose_solver::PointsToGrid>> ceres_interpolator_vec;
 
 
     std::cerr << " marker_points_clusters.size = " << marker_points_clusters.size() << std::endl;
 
-    {
 
-        for(int i = 0; i < marker_points_clusters.size();i++){
-            std::vector<float> points_for_grid;
-
-            std::cerr << " marker_points_clusters[i].size() = " << marker_points_clusters[i].size()<< std::endl;
-
-            points_for_grid.resize(marker_points_clusters[i].size() + marker_points_clusters[i].size());
-            for(int j = 0; j < marker_points_clusters[i].size(); j++){
-                points_for_grid[j+j] = marker_points_clusters[i][j][0];
-                points_for_grid[j+j+1] = marker_points_clusters[i][j][1];
-
-            }
-            std::cerr << " points_for_grid.size() = " << points_for_grid.size()<< std::endl;
-
-            ceres_grid_vec.emplace_back(points_for_grid);
-            ceres_interpolator_vec.emplace_back(ceres_grid_vec.back());
-
-        }
-
-    }
 
 
 
@@ -391,43 +479,10 @@ int main(int argc, char** argv){
     ros::Publisher initialpose_pub = nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("/initialpose",10);
     ros::Publisher solved_pub = nh.advertise<geometry_msgs::PoseWithCovarianceStamped>("/solved_pose",10);
 
-    visualization_msgs::MarkerArray marker_array_msg;
-    visualization_msgs::Marker  marker_msg;
-    marker_msg.header.frame_id = "map";//fixed_frame;
-    marker_msg.type = visualization_msgs::Marker::CYLINDER;
-    marker_msg.action = visualization_msgs::Marker::ADD;
-    marker_msg.pose.orientation.w = 1.0;
-    marker_msg.scale.x = 0.05;
-    marker_msg.scale.y = 0.05;
-    marker_msg.scale.z = 0.05;
-    marker_msg.header.stamp = ros::Time();
-    marker_msg.color.a = 0.5; // Don't forget to set the alpha!
-    marker_msg.color.r = 0.0;
-    marker_msg.color.g = 1.0;
-    marker_msg.color.b = 0.0;
 
 
-    ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("marker",10);
 
 
-    int marker_num = marker_points.size();
-    marker_array_msg.markers.resize(marker_num + marker_num,marker_msg);
-    for(int i = 0; i < marker_points.size();i++){
-        marker_array_msg.markers[i].type = visualization_msgs::Marker::CYLINDER;
-        marker_array_msg.markers[i].pose.position.x = marker_points[i][0];
-        marker_array_msg.markers[i].pose.position.y = marker_points[i][1];
-        marker_array_msg.markers[i].id = i;
-
-
-        marker_array_msg.markers[i+marker_num].type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-        marker_array_msg.markers[i+marker_num].pose.position.x = marker_points[i][0];
-        marker_array_msg.markers[i+marker_num].pose.position.y = marker_points[i][1];
-        marker_array_msg.markers[i+marker_num].id = i+marker_num;
-
-        char s[100];
-        sprintf(s, R"(%d : [%.3f,%.3f])",i, marker_points[i][0],marker_points[i][1]);
-        marker_array_msg.markers[i+marker_num].text = s;
-    }
 
 
 
@@ -440,7 +495,251 @@ int main(int argc, char** argv){
     bool update_valid_laser_mark = false;
 
 
+    std::vector<std::vector<float>> scan_points_buffer ;
 
+    auto cb2 = [&]( const sensor_msgs::LaserScanConstPtr &msg){
+
+        last_scan_time = common::FromUnixNow();
+
+        if(!control_command_on){
+
+            return ;
+        }
+
+        scan_handler.getLocalPoints(msg->ranges,msg-> intensities, msg->angle_min,msg->angle_increment,msg->range_max   );
+
+        if(!tf_static_transform_received){
+            ROS_INFO("Waiting for static transform. %s to %s ",base_frame.c_str(), base_frame.c_str() );
+
+            try{
+//                tl_.waitForTransform(base_frame, msg->header.frame_id, ros::Time(0), ros::Duration(10.0));
+                tl_.lookupTransform(base_frame, msg->header.frame_id, ros::Time(0), transform);
+
+#if 0
+                // use tf2
+                transformStamped  = tfBuffer.lookupTransform(base_frame, msg->header.frame_id, ros::Time(0) );
+
+#endif
+
+
+                base_to_laser_tf.set(transform.getOrigin().x(),transform.getOrigin().y(),  tf::getYaw(transform.getRotation()));
+
+                tf_static_transform_received = true;
+            }catch (tf::TransformException& ex) {
+                ROS_ERROR("%s", ex.what());
+//            ros::Duration(1.0).sleep();
+                tf_static_transform_received = false;
+            }
+
+
+        }
+
+        if(!tf_static_transform_received){
+            return;
+
+        }
+
+        try{
+            tl_.waitForTransform(fixed_frame, base_frame, ros::Time(0), ros::Duration(0.05));
+
+            tl_.lookupTransform(odom_frame, base_frame, msg->header.stamp, transform);
+            odom_to_base_tf.set(transform.getOrigin().x(),transform.getOrigin().y(),  tf::getYaw(transform.getRotation()));
+
+            tl_.lookupTransform(fixed_frame, msg->header.frame_id, msg->header.stamp, transform);
+            transform_.setOrigin(transform.getOrigin());
+            transform_.setRotation(transform.getRotation());
+
+            tf_transform_received = true;
+            ROS_INFO("Get dynamic transform. %s to %s ",fixed_frame.c_str(), msg->header.frame_id.c_str() );
+
+
+            scan_handler.getGlobalPoints();
+
+            transform2D.set(transform_.getOrigin().x(),transform_.getOrigin().y(),  tf::getYaw(transform_.getRotation()));
+            std::cerr << "transform2D:\n" << transform2D << std::endl;
+            transform2D_inv = transform2D.inverse();
+            std::cerr << "transform2D.inv:\n" << transform2D_inv<< std::endl;
+            transform2D_inv.mul(marker_points_array_2d,marker_points_array_2d_in_laser);
+
+            for(int i = 0; i < marker_points.size();i++){
+                std::cout  << "[ " << marker_points_array_2d_in_laser[i+i] << ", " <<  marker_points_array_2d_in_laser[i+i +1]  << "]," ;
+
+                marker_points_in_laser[i][0] = marker_points_array_2d_in_laser[i+i];
+                marker_points_in_laser[i][1] = marker_points_array_2d_in_laser[i+i+1];
+
+            }
+
+            scan_handler.filterMarker(marker_points_in_laser);
+
+            {
+                std::cout << "scan_pub try publish \n";
+
+                scan_msg.header = msg->header;
+                scan_msg.intensities = msg->intensities;
+                scan_msg.angle_increment = msg->angle_increment;
+                scan_msg.range_max = msg->range_max;
+                scan_msg.range_min = msg->range_min;
+                scan_msg.time_increment = msg->time_increment;
+                scan_msg.angle_min = msg->angle_min;
+                scan_msg.angle_max = msg->angle_max;
+
+                scan_msg.ranges = scan_handler.ranges_filtered;
+                scan_pub.publish(scan_msg);
+                std::cout << "scan_pub publish done\n";
+            }
+
+            {
+                std::cout << "marker_pub try publish \n";
+
+                valid_marker_num = 0;
+                for(int i = 0; i < marker_points.size();i++){
+                    char s[100];
+                    float mean_x = 0.0, mean_y = 0.0;
+                    for(auto&e : scan_handler.filter_cluster_points[i]){
+                        mean_x += e[0];
+                        mean_y += e[1];
+                    }
+                    if (scan_handler.filter_cluster_points[i].size() >0){
+                        mean_x /= scan_handler.filter_cluster_points[i].size();
+                        mean_y /= scan_handler.filter_cluster_points[i].size();
+                        valid_marker_num ++;
+
+                    }
+
+                    sprintf(s, R"(%d : [%.3f,%.3f], %zu , [%.3f,%.3f], [%.3f,%.3f])",i, marker_points[i][0],marker_points[i][1],scan_handler.filter_cluster_points[i].size()
+                            ,marker_points_array_2d_in_laser[i+i],marker_points_array_2d_in_laser[i+i+1],mean_x, mean_y);
+                    marker_array_msg.markers[i+marker_points.size()].text = s;
+                }
+
+
+                marker_pub.publish(marker_array_msg);
+                std::cout << "marker_pub publish done\n";
+
+            }
+            std::cout << "valid_marker_num : " << valid_marker_num << "\n";
+
+            if(valid_marker_num < 2){
+                std::cout << "valid_marker_num : " << valid_marker_num << "\n skip scan \n";
+                return;
+            }
+
+            std::cout << "try create scan_points_buffer\n";
+
+            scan_points_buffer.resize(scan_handler.filter_cluster_points.size());
+            for(int i = 0 ; i < scan_handler.filter_cluster_points.size();i++){
+                scan_points_buffer[i].resize(scan_handler.filter_cluster_points[i].size()+scan_handler.filter_cluster_points[i].size());
+
+                for(int j = 0 ; j  <scan_handler.filter_cluster_points[i].size();j++){
+                    scan_points_buffer[i][j+j] = scan_handler.filter_cluster_points[i][j][0];
+                    scan_points_buffer[i][j+j+1] = scan_handler.filter_cluster_points[i][j][1];
+
+                }
+            }
+
+            std::cout << "create scan_points_buffer done\n";
+
+            auto init_x = std::array<double,3>{transform2D.x(),transform2D.y(),transform2D.yaw()};
+            auto& pointcloud = scan_points_buffer;
+
+
+            std::cout << "start ceres\n";
+            std::cout << "start ceres_grid_vec.size " << ceres_grid_vec.size() << "\n";
+
+            ceres::Problem problem;
+            for(int i = 0 ; i < ceres_grid_vec.size();i++){
+
+                if (pointcloud[i].empty()) continue;
+
+
+                ceres::CostFunction* cost_function =   pose_solver::SimpleAutoDiffBiCubicCost_V2::Create(&(ceres_grid_vec[i]), 1.0, pointcloud[i]);
+                problem.AddResidualBlock(cost_function, nullptr, &(init_x[0]));
+
+            }
+            std::cout << "start ceres CostFunction done " << std::endl;
+
+            ceres::Solver::Options ceres_solver_options;
+//
+            ceres_solver_options.minimizer_progress_to_stdout = true;
+            ceres_solver_options.num_threads = 1;
+            ceres_solver_options.function_tolerance = 1e-3;  // Enough for denoising.
+            ceres_solver_options.max_num_iterations = 100;
+            ceres_solver_options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+            ceres_solver_options.parameter_tolerance = 1e-12;
+
+            //===
+            ceres_solver_options.minimizer_progress_to_stdout = false;
+            ceres_solver_options.num_threads = 1;
+            ceres_solver_options.function_tolerance = 1e-4;  // Enough for denoising.
+            ceres_solver_options.max_num_iterations = 200;
+            ceres_solver_options.gradient_tolerance = 1e-4;
+            ceres_solver_options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+            ceres_solver_options.parameter_tolerance = 1e-4;
+
+//        ceres_solver_options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY; // crash
+//        ceres_solver_options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY; // crash
+            ceres_solver_options.linear_solver_type = ceres::DENSE_QR;
+
+            ceres_solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+
+
+            ceres::Solver::Summary summary;
+            std::cout << "start ceres Solve " << std::endl;
+
+            ceres::Solve(ceres_solver_options, &problem, &summary);
+            std::cout << summary.BriefReport() << '\n';
+            std::cout << "init_x : " << init_x[0] << ", " << init_x[1] << ", " << init_x[2] << std::endl;
+
+            transform::Transform2d solved_pose(init_x[0],init_x[1],init_x[2]);
+
+            solved_pose = solved_pose*base_to_laser_tf.inverse();
+
+            std::cout << "solved solved_pose: " << solved_pose << std::endl;
+            initialpose_msg.pose.pose.position.x = solved_pose.x();
+            initialpose_msg.pose.pose.position.y = solved_pose.y();
+
+            tf::quaternionTFToMsg(tf::createQuaternionFromYaw(solved_pose.yaw()), initialpose_msg.pose.pose.orientation );
+            initialpose_msg.header.stamp =   msg->header.stamp;
+
+            solved_pub.publish(initialpose_msg);
+
+            {
+                auto& temp_odom_to_base_tf = odom_to_base_tf;
+
+                // map_odom_tf * odom_base_tf * base_laser_tf = map_laser_tf
+                transform::Transform2d map_odom_tf = solved_pose  *temp_odom_to_base_tf.inverse();
+
+                tf::Transform map_odom_transform;
+                map_odom_transform.setOrigin( tf::Vector3(map_odom_tf.x(), map_odom_tf.y(), 0.0) );
+                tf::Quaternion q;
+                q.setRPY(0, 0, map_odom_tf.yaw());
+                map_odom_transform.setRotation(q);
+
+                ros::Time transform_expiration = (msg->header.stamp +
+                                                  transform_tolerance_);
+
+                pub_tf_stamped = tf::StampedTransform (map_odom_transform,
+                                                       transform_expiration,
+                                                       fixed_frame, odom_frame);
+
+                pub_tf_stamped.stamp_ = ros::Time::now() +
+                                        transform_tolerance_;
+
+
+                std::cout << "map_odom_tf: " << map_odom_tf << std::endl;
+                std::cout << "base_to_laser_tf: " << base_to_laser_tf << std::endl;
+                std::cout << "odom_to_base_tf: " << odom_to_base_tf << std::endl;
+
+
+
+                map_odom_tf_computed = true;
+            }
+
+        }catch (tf::TransformException& ex) {
+            ROS_ERROR("%s", ex.what());
+            return;
+        }
+
+    };
 
     auto cb = [&]( const sensor_msgs::LaserScanConstPtr &msg) {
 
@@ -571,7 +870,7 @@ int main(int argc, char** argv){
 
                     sprintf(s, R"(%d : [%.3f,%.3f], %zu , [%.3f,%.3f], [%.3f,%.3f])",i, marker_points[i][0],marker_points[i][1],scan_handler.filter_cluster_points[i].size()
                     ,marker_points_array_2d_in_laser[i+i],marker_points_array_2d_in_laser[i+i+1],mean_x, mean_y);
-                    marker_array_msg.markers[i+marker_num].text = s;
+                    marker_array_msg.markers[i+marker_points.size()].text = s;
                 }
 
 
@@ -681,7 +980,7 @@ int main(int argc, char** argv){
                         if (pointcloud[i].empty()) continue;
 
 
-                        ceres::CostFunction* cost_function =   pose_solver::SimpleAutoDiffBiCubicCost_V2::Create(&(ceres_grid_vec[i]), 1.0, std::get<5>(ceres_sequence.back())[i]);
+                        ceres::CostFunction* cost_function =   pose_solver::SimpleAutoDiffBiCubicCost_V2::Create(&(ceres_grid_vec[i]), 1.0, pointcloud[i]);
                         problem.AddResidualBlock(cost_function, nullptr, &(init_x[0]));
 
                     }
@@ -939,7 +1238,7 @@ int main(int argc, char** argv){
 
 
     };
-    ros::Subscriber sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, cb);
+    ros::Subscriber sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, cb2);
     nh_private.setParam(amcl_tf_broadcast,true);
 
 
@@ -986,7 +1285,7 @@ int main(int argc, char** argv){
                 nh_private.setParam(amcl_tf_broadcast,false);
 
             }
-            if((detect_mode == DETECT_MODE_FREE_INIT)){
+            if(( std::strcmp(detect_mode.c_str(),DETECT_MODE_FREE_INIT.c_str() ) == 0)){
                 initialpose_pub.publish(initialpose_msg);
             }
 
@@ -1044,6 +1343,8 @@ int main(int argc, char** argv){
     }
 
 
+
+    nh_private.setParam(amcl_tf_broadcast,true);
 
 
 }
