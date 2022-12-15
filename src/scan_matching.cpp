@@ -68,6 +68,11 @@
 #include <pcl/octree/octree.h>
 #include <pcl/octree/octree_impl.h>
 #include <pcl/octree/octree_pointcloud_adjacency.h>
+
+#include <pcl/features/fpfh_omp.h>
+
+
+
 #include <fstream>
 
 
@@ -90,7 +95,9 @@ namespace fs = ghc::filesystem;
 
 
 #include "nlohmann/json.hpp"
-
+#include <plog/Log.h> // Step1: include the headers
+#include "plog/Initializers/RollingFileInitializer.h"
+#include "plog/Appenders/ColorConsoleAppender.h"
 
 
 namespace serialization {
@@ -609,6 +616,10 @@ struct MovementCheck {
         return still;
     }
 
+    float getStillTime(){
+        return common::ToMillSeconds(common::FromUnixNow() - last_time);
+    }
+
 
 };
 
@@ -803,6 +814,46 @@ namespace pcl{
     };
 }
 
+template <typename T>
+T normalise_angle(){
+
+}
+
+class MapOdomFilter{
+private:
+    int max_len = 5;
+    std::deque<transform::Transform2d> buffer;
+
+public:
+    MapOdomFilter(int t_max_len = 5):max_len(t_max_len){ }
+    void setLen(int t_max_len){
+        max_len = t_max_len;
+    }
+    transform::Transform2d add(const transform::Transform2d& t_pose){
+        if(buffer.size() > max_len){
+            buffer.pop_back();
+        }
+        buffer.emplace_front(t_pose);
+
+        float x = 0.0, y = 0.0 ,yaw = 0.0;
+        transform::Transform2d relative_pose , first_pose_inv = t_pose.inverse();
+        for(int i = 1 ; i < buffer.size();i++){
+            relative_pose = first_pose_inv*buffer[i];
+
+            x += relative_pose.x();
+            y += relative_pose.y();
+            yaw += relative_pose.yaw();
+        }
+        x /= buffer.size();
+        y /= buffer.size();
+        yaw /= buffer.size();
+
+        relative_pose.set(x,y,yaw);
+
+        return relative_pose;
+    }
+};
+
 
 /*
 use 2d/3d pointcloud to solve robot pose;
@@ -869,6 +920,13 @@ public:
 
     };
 
+
+    struct ErrorRejectionConfig{
+        float max_translation_jump = 0.2;
+        float max_rotation_jump = 0.2;
+
+    };
+
     FilterReadingConfig &getFilterReadingConfig() {
 
         return m_filter_reading_config;
@@ -891,6 +949,13 @@ public:
         return m_move_check_config;
     }
 
+    ErrorRejectionConfig& getErrorRejectionConfig(){
+        return m_error_rejection_config;
+
+    }
+    using ICPTYPE = pcl::registration::TransformationEstimationPointToPlane<pcl::PointNormal, pcl::PointNormal>;
+//    using ICPTYPE = pcl::registration::TransformationEstimationLM<pcl::PointNormal, pcl::PointNormal>;
+
 
 private:
     FilterReadingConfig m_filter_reading_config;
@@ -898,6 +963,8 @@ private:
     NormEstConfig m_norm_est_config;
     IcpConfig m_icp_config;
     MoveCheckConfig m_move_check_config;
+    ErrorRejectionConfig m_error_rejection_config;
+
 
     Mode mode = Mode::mapping;
 
@@ -907,6 +974,9 @@ private:
     transform::Transform2d sensor_relative_pose;
     // sensor pose in /origin frame
     transform::Transform2d sensor_absolute_pose;
+    transform::Transform2d sensor_absolute_pose_last;
+    transform::Transform2d sensor_absolute_pose_change;
+
     // robot pose in origin frame
     transform::Transform2d robot_relative_pose;
     // robot pose in /map frame
@@ -926,6 +996,10 @@ private:
     bool is_sensor_pose_set = false;
 
     bool is_icp_init = true;
+
+    bool is_icp_fault = false;
+
+    bool is_icp_converged = false;
 
 
     // cloud as map
@@ -948,8 +1022,8 @@ private:
 
 
     // filter reference
-    pcl::RadiusOutlierRemoval<pcl::PointXYZ> m_refe_radius_outlier_removal;
-    pcl::VoxelGrid<pcl::PointXYZ> m_refe_approximate_voxel_grid;
+    pcl::RadiusOutlierRemoval<pcl::PointNormal> m_refe_radius_outlier_removal;
+    pcl::VoxelGrid<pcl::PointNormal> m_refe_approximate_voxel_grid;
 
 
     // icp
@@ -958,7 +1032,8 @@ private:
 
 
 //    pcl::registration::TransformationEstimationPointToPlaneWeighted<pcl::PointNormal, pcl::PointNormal>::Ptr m_pl_te;
-    pcl::registration::TransformationEstimationPointToPlane<pcl::PointNormal, pcl::PointNormal>::Ptr m_pl_te;
+    ICPTYPE::Ptr m_pl_te;
+    std::vector<double> m_pl_te_weights;
 
     // norm est
     pcl::search::KdTree<pcl::PointXYZ>::Ptr m_norm_tree;
@@ -973,6 +1048,7 @@ private:
 
     MovementCheck m_movement_check;
 
+    MapOdomFilter map_odom_filter;
 
 public:
     PointCloudPoseSolver() : cloud_reference(new pcl::PointCloud<pcl::PointNormal>),
@@ -991,7 +1067,8 @@ public:
                              m_norm_tree(new pcl::search::KdTree<pcl::PointXYZ>),
 
                              m_pl_te(
-                                     new pcl::registration::TransformationEstimationPointToPlane<pcl::PointNormal, pcl::PointNormal>) ,
+                                     new ICPTYPE) ,
+                             m_pl_te_weights(1000),
                              m_octree_reading(0.05),
                              m_octree_reference(0.05),m_norm_est_reading(m_octree_reading),m_norm_est_reference(m_octree_reference){
 
@@ -1011,8 +1088,9 @@ public:
         m_radius_outlier_removal.setMinNeighborsInRadius(m_filter_reading_config.radius_rmv_nn);
 
 
+        m_view_cond.reset(new pcl::ConditionAnd<pcl::PointNormal>());
         m_view_cond->addComparison(pcl::FieldComparison<pcl::PointNormal>::ConstPtr(
-                new pcl::FieldComparison<pcl::PointNormal>("curvature", pcl::ComparisonOps::GT,
+                new pcl::FieldComparison<pcl::PointNormal>("curvature", pcl::ComparisonOps::LT,
                                                            m_filter_reading_config.cond_curve)));
         m_cond_rem.setCondition(m_view_cond);
 
@@ -1039,17 +1117,24 @@ public:
         m_pl_icp.setRANSACOutlierRejectionThreshold(m_icp_config.ransac_outlier);
 
         m_pl_icp.setMaximumIterations(m_icp_config.max_iter);
-        m_pl_icp.setTransformationEpsilon(1e-5);
-        m_pl_icp.setEuclideanFitnessEpsilon(1e-5);
-        m_pl_icp.setTransformationRotationEpsilon(1e-5);
+        m_pl_icp.setTransformationEpsilon(m_icp_config.transformation_epsilon);
+        m_pl_icp.setEuclideanFitnessEpsilon(m_icp_config.rotation_epsilon);
+        m_pl_icp.setTransformationRotationEpsilon(m_icp_config.rotation_epsilon);
+
+#if 0
+        m_pl_icp.setRANSACOutlierRejectionThreshold(0.08);
+        m_pl_icp.setRANSACIterations(4);
+#endif
 
 
-        m_movement_check.no_move_check_ms = m_movement_check.no_move_check_ms;
-        m_movement_check.no_move_translation_epsilon = m_movement_check.no_move_translation_epsilon;
-        m_movement_check.no_move_rotation_epsilon = m_movement_check.no_move_rotation_epsilon;
-        m_movement_check.final_no_move_translation_epsilon = m_movement_check.final_no_move_translation_epsilon;
-        m_movement_check.final_no_move_rotation_epsilon = m_movement_check.final_no_move_rotation_epsilon;
+        m_movement_check.no_move_check_ms = m_move_check_config.no_move_check_ms;
+        m_movement_check.no_move_translation_epsilon = m_move_check_config.no_move_translation_epsilon;
+        m_movement_check.no_move_rotation_epsilon = m_move_check_config.no_move_rotation_epsilon;
+        m_movement_check.final_no_move_translation_epsilon = m_move_check_config.final_no_move_translation_epsilon;
+        m_movement_check.final_no_move_rotation_epsilon = m_move_check_config.final_no_move_rotation_epsilon;
 
+
+        map_odom_filter.setLen(20);
 
     }
 
@@ -1094,8 +1179,13 @@ public:
         initial_guess(1, 1) = est_pose.matrix[1][1];
         initial_guess(0, 3) = est_pose.matrix[0][2];
         initial_guess(1, 3) = est_pose.matrix[1][2];
-
-
+#if 0
+        m_pl_te_weights.resize(t_reading->size());
+        for(int i = 0; i < m_pl_te_weights.size();i++){
+            m_pl_te_weights[i] = 1.0 - std::abs(t_reading->points[i].curvature);
+        }
+        m_pl_te->setWeights(m_pl_te_weights);
+#endif
         m_pl_icp.setInputSource(t_reading);
         m_pl_icp.setInputTarget(t_cloud);
         m_pl_icp.align(*t_align, initial_guess);
@@ -1135,7 +1225,7 @@ public:
 
         (*cloud_reference) += (*t_reading);
 
-#if 1
+#if 0
 
         pcl::copyPointCloud(*cloud_reference, *temp_cloud_1);
 
@@ -1149,6 +1239,13 @@ public:
                     pcl::PointXYZ(sensor_absolute_pose.x(), sensor_absolute_pose.y(), 0.0));
 #endif
 
+#if 1
+        m_refe_approximate_voxel_grid.setInputCloud(cloud_reference);
+        m_refe_approximate_voxel_grid.filter(*temp_cloud_norm);
+
+        m_refe_radius_outlier_removal.setInputCloud(temp_cloud_norm);
+        m_refe_radius_outlier_removal.filter(*cloud_reference);
+#endif
 
 
 #if 0
@@ -1185,13 +1282,14 @@ public:
 
     void matchUpdate(const transform::Transform2d &odom_pose) {
 
-//        std::cout << __FILE__ << ":" << __LINE__ << " , odom_pose : " << odom_pose << "\n";
 
-        bool update = m_movement_check.check(odom_pose);
+//        std::cout << "check time: " << m_movement_check.getStillTime() << "\n";
+
+        bool update = m_movement_check.check(odom_pose) ;
 //        std::cout << __FILE__ << ":" << __LINE__ << " , update : " << update << ", size : " << cloud_reference->size()   << "\n";
 
 
-        if (update || cloud_reference->size() == 0) {
+        if ((update ) || cloud_reference->size() == 0) {
 
 //            std::cout << __FILE__ << ":" << __LINE__ << " call updateReference \n";
 
@@ -1233,18 +1331,60 @@ public:
 
     }
 
+    bool isIcpInit() const{
+        return is_icp_init;
+    }
+    bool isIcpOk() const{
+        return is_icp_converged && !is_icp_fault;
+    }
     void match_v2() {
 
-        if(!is_icp_init){
 
-            std::cout << "icp init_pose is not set in loc mode" << std::endl;
+        PLOGD << "try icp" << is_icp_init << ", " << is_icp_fault << std::endl;
+
+        if(!is_icp_init || is_icp_fault){
+
+            PLOGD << "skip icp" << is_icp_init << ", " << is_icp_fault << std::endl;
 
             return;
         }
 
+
         if (!cloud_reference->empty()) {
 
+            PLOGD << "sensor_absolute_pose before icp : " << sensor_absolute_pose << std::endl;
+            sensor_absolute_pose_last = sensor_absolute_pose;
+
             float score = icp_match(cloud_reading_filtered_norm, cloud_reference, cloud_align, sensor_absolute_pose);
+            PLOGD << "sensor_absolute_pose after  icp : " << sensor_absolute_pose << std::endl;
+            PLOGD << "sensor_absolute_pose sensor_absolute_pose_last: " << sensor_absolute_pose_last << std::endl;
+
+            PLOGD << "icp score : " << score << ", " << m_pl_icp.hasConverged()   << std::endl;
+
+
+            sensor_absolute_pose_change = sensor_absolute_pose_last.inverse() *sensor_absolute_pose;
+            PLOGD << "icp sensor_absolute_pose_change : " << sensor_absolute_pose_change  << std::endl;
+
+
+            is_icp_converged = !(!m_pl_icp.hasConverged()
+                               || (std::abs(sensor_absolute_pose_change.x()) > m_error_rejection_config.max_translation_jump)
+                               ||  (std::abs(sensor_absolute_pose_change.y()) > m_error_rejection_config.max_translation_jump)
+                               || (std::abs(sensor_absolute_pose_change.yaw()) > m_error_rejection_config.max_rotation_jump));
+
+            if(is_icp_converged){
+
+            }
+            else{
+//                std::cout << "***************\nsensor_absolute_pose_change : fault\n *************************************";
+                PLOGD << "icp fault wait reset " << std::endl;
+
+//                cloud_align->clear();
+
+                is_icp_fault = true;
+                sensor_absolute_pose = sensor_absolute_pose_last;
+            }
+
+
 
 
         } else {
@@ -1252,10 +1392,14 @@ public:
 
         }
 
-        robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
-        robot_absolute_pose = origin * robot_relative_pose;
 
+//        if(m_movement_check.getStillTime() < 100.0 )
+        {
 
+            robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
+            robot_absolute_pose = origin * robot_relative_pose;
+
+        }
     }
 
     bool matchReading() {
@@ -1313,7 +1457,8 @@ public:
         }
 
         is_origin_computed = true;
-        is_icp_init = false;
+        resetIcp();
+
 
         std::cout << "load from file ok ; origin:\n" << origin << "\ncloud_reference size :  " << cloud_reference->size() << std::endl;
 
@@ -1323,9 +1468,8 @@ public:
 
     // in mapping mode
     // cloud_reference should be dumped to fle
-    void dumpToFile(const std::string &file_dir) {
+    int dumpToFile(const std::string &file_dir,const std::string& stamp) {
 
-        std::string stamp = common::getCurrentDateTime("%Y-%m-%d-%H-%M-%S");
 
         fs::path output_dir(file_dir);
 
@@ -1339,6 +1483,12 @@ public:
         }
 
 
+        if(cloud_reference->empty()){
+            std::cerr << "cloud_reference is empty"  << std::endl;
+
+            return -1;
+
+        }
 
         fs::path path_pose = output_stamp_dir / "origin.json";
         fs::path path_pcd = output_stamp_dir / "cloud.pcd";
@@ -1352,6 +1502,7 @@ public:
         pcl::io::savePCDFileASCII(path_pcd.c_str(), *cloud_reference);
         std::cerr << "Saved " << cloud_reference->size() << " data points to " << path_pcd.c_str() << std::endl;
 
+        return 0;
     }
 
 
@@ -1385,6 +1536,8 @@ public:
     // set origin pose directly
     void setOrigin(const transform::Transform2d &t) {
         origin = t;
+        is_origin_computed = true;
+
     }
 
     const transform::Transform2d &getOrigin() {
@@ -1401,11 +1554,13 @@ public:
     }
 
     void setRobotAbsolutePoseOrigin(const transform::Transform2d &t) {
-        if (is_sensor_pose_set && !is_origin_computed) {
+        if (is_sensor_pose_set && !is_origin_computed&& !is_icp_init) {
             robot_absolute_pose = t;
             origin = robot_absolute_pose * robot_relative_pose.inverse();
 
             is_origin_computed = true;
+            is_icp_init = true;
+
         }
     }
 
@@ -1415,8 +1570,16 @@ public:
             robot_relative_pose = origin.inverse() * robot_absolute_pose;
 
             sensor_absolute_pose = robot_relative_pose *sensor_relative_pose;
+            sensor_absolute_pose_last = sensor_absolute_pose;
+
             is_icp_init = true;
+
         }
+    }
+
+    void resetIcp(){
+        is_icp_init = false;
+        is_icp_fault = false;
     }
 
     const transform::Transform2d &getRobotAbsolutePose() {
@@ -1429,21 +1592,58 @@ public:
 
     const transform::Transform2d &solveMapOdom(const transform::Transform2d &t_odom_base) {
 
-        robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
+
+
+#if 0
+        bool update = m_movement_check.check(t_odom_base) ;
+        std::cout << "solveMapOdom m_movement_check " << m_movement_check.isStill() << ", " << m_movement_check.getStillTime() <<  "\n";
+        if(m_movement_check.isStill()){
+
+            return map_odom_pose;
+        }
+#endif
+//        robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
         robot_absolute_pose = origin * robot_relative_pose;
         map_odom_pose = robot_absolute_pose * t_odom_base.inverse();
+
+
+#if 0
+        map_odom_pose = map_odom_filter.add(map_odom_pose);
+#endif
         return map_odom_pose;
     }
 
 };
 
+/*  todo
+final target
+1. remove dynamic object
+2. filter noise
+
+method
+1. sensor data fusion window
+
+*/
 
 
 
 
+
+/*
+ RealtimeScanBuilder
+
+ accumulate scan data , create a filtered pointcloud
+
+ 1. robot dosen't move
+ 2. robot move
+ */
 
 
 int main(int argc, char **argv) {
+
+    plog::RollingFileAppender<plog::CsvFormatter> fileAppender("scan_matching.csv", 800000, 10); // Create the 1st appender.
+    plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender; // Create the 2nd appender.
+    plog::init(plog::debug, &fileAppender).addAppender(&consoleAppender); // Initialize the logger with the both appenders.
 
 
     std::vector<PointsStamped> laser_points_cache;
@@ -1455,10 +1655,10 @@ int main(int argc, char **argv) {
 
 
     std::string file_dir = "data";
-    std::string file_dir_param = "file_dir";
+    const char* file_dir_param = "file_dir";
 
     std::string load_dir ;
-    std::string load_dir_param = "load_dir";
+    const char* load_dir_param = "load_dir";
 
     std::string mode = "map";
     const char* MODE_MAP = "map";
@@ -1468,47 +1668,62 @@ int main(int argc, char **argv) {
     bool dump_data = false;
 
 
-    std::string mode_param = "mode";
+    const char* mode_param = "mode";
+
+
+    bool wait_extern_pose = true;
+    const char* wait_extern_pose_param = "wait_extern_pose";
+
 
 
     float range_max = 30.0;
-    std::string range_max_param = "range_max";
+    const char* range_max_param = "range_max";
     float range_min = 1.0;
-    std::string range_min_param = "range_min";
+    const char* range_min_param = "range_min";
 
     float pcl_voxel_leaf_x = 0.05;
     float pcl_voxel_leaf_y = 0.05;
     float pcl_voxel_leaf_z = 0.05;
-    std::string pcl_voxel_leaf_x_param = "pcl_voxel_leaf_x";
-    std::string pcl_voxel_leaf_y_param = "pcl_voxel_leaf_y";
-    std::string pcl_voxel_leaf_z_param = "pcl_voxel_leaf_z";
+    const char* pcl_voxel_leaf_x_param = "pcl_voxel_leaf_x";
+    const char* pcl_voxel_leaf_y_param = "pcl_voxel_leaf_y";
+    const char* pcl_voxel_leaf_z_param = "pcl_voxel_leaf_z";
     int pcl_radius_neighbors = 3;
     float pcl_radius_radius = 0.1;
 
     float scan_point_jump = 0.06;
     float scan_noise_angle = 0.06;
 
-    std::string scan_point_jump_param = "scan_point_jump";
-    std::string scan_noise_angle_param = "scan_noise_angle";
+    const char* scan_point_jump_param = "scan_point_jump";
+    const char* scan_noise_angle_param = "scan_noise_angle";
 
-    std::string pcl_radius_neighbors_param = "pcl_radius_neighbors";
-    std::string pcl_radius_radius_param = "pcl_radius_radiusSearch";
+    const char* pcl_radius_neighbors_param = "pcl_radius_neighbors";
+    const char* pcl_radius_radius_param = "pcl_radius_radiusSearch";
 
     float pcl_norm_radius = 0.8;
-    std::string pcl_norm_radius_param = "pcl_norm_radius";
+    const char* pcl_norm_radius_param = "pcl_norm_radius";
+
+    float pcl_cond_curvature = 0.2;
+
+    const char* pcl_cond_curvature_param = "pcl_cond_curvature";
 
 
     float pcl_ref_voxel_leaf_x = 0.08;
     float pcl_ref_radius_radius = 0.1;
     int pcl_ref_radius_neighbors = 3;
-    std::string pcl_ref_voxel_leaf_x_param = "pcl_ref_voxel_leaf_x";
-    std::string pcl_ref_radius_radius_param = "pcl_ref_radius_radius";
-    std::string pcl_ref_radius_neighbors_param = "pcl_ref_radius_neighbors";
+    const char* pcl_ref_voxel_leaf_x_param = "pcl_ref_voxel_leaf_x";
+    const char* pcl_ref_radius_radius_param = "pcl_ref_radius_radius";
+    const char* pcl_ref_radius_neighbors_param = "pcl_ref_radius_neighbors";
 
     float pcl_icp_max_match_distance = 0.3;
-    std::string pcl_icp_max_match_distance_param = "pcl_icp_max_match_distance";
+    const char* pcl_icp_max_match_distance_param = "pcl_icp_max_match_distance";
     int pcl_icp_max_iter = 30;
-    std::string pcl_icp_max_iter_param = "pcl_icp_max_iter";
+    const char* pcl_icp_max_iter_param = "pcl_icp_max_iter";
+
+    float pcl_icp_rotation_epsilon = 1e-6;
+    float pcl_icp_translation_epsilon = 1e-6;
+    const char* pcl_icp_rotation_epsilon_param = "pcl_icp_rotation_epsilon";
+    const char* pcl_icp_translation_epsilon_param = "pcl_icp_translation_epsilon";
+
 
     float no_move_translation = 5e-3;
     float no_move_rotation = 5e-3;
@@ -1518,12 +1733,21 @@ int main(int argc, char **argv) {
     float no_move_ms = 500.0;
 
 
-    std::string no_move_translation_param = "no_move_translation";
-    std::string no_move_rotation_param = "no_move_rotation";
-    std::string final_no_move_translation_param = "final_no_move_translation";
-    std::string final_no_move_rotation_param = "final_no_move_rotation";
-    std::string no_move_ms_param = "no_move_ms";
+    const char* no_move_translation_param = "no_move_translation";
+    const char* no_move_rotation_param = "no_move_rotation";
+    const char* final_no_move_translation_param = "final_no_move_translation";
+    const char* final_no_move_rotation_param = "final_no_move_rotation";
+    const char* no_move_ms_param = "no_move_ms";
 
+
+    float icp_reject_translation_jump = 0.1;
+    float icp_reject_rotation_jump = 0.1;
+    const char* icp_reject_translation_jump_param = "icp_reject_translation_jump";
+    const char* icp_reject_rotation_jump_param = "icp_reject_rotation_jump";
+
+
+    nh_private.getParam(icp_reject_translation_jump_param, icp_reject_translation_jump);
+    nh_private.getParam(icp_reject_rotation_jump_param, icp_reject_rotation_jump);
 
     nh_private.getParam(range_max_param, range_max);
     nh_private.getParam(range_min_param, range_min);
@@ -1539,6 +1763,10 @@ int main(int argc, char **argv) {
 
     nh_private.getParam(pcl_norm_radius_param, pcl_norm_radius);
 
+
+    nh_private.getParam(pcl_cond_curvature_param, pcl_cond_curvature);
+
+
     nh_private.getParam(pcl_ref_voxel_leaf_x_param, pcl_ref_voxel_leaf_x);
     nh_private.getParam(pcl_ref_radius_radius_param, pcl_ref_radius_radius);
     nh_private.getParam(pcl_ref_radius_neighbors_param, pcl_ref_radius_neighbors);
@@ -1546,6 +1774,10 @@ int main(int argc, char **argv) {
     nh_private.getParam(pcl_icp_max_match_distance_param, pcl_icp_max_match_distance);
 
     nh_private.getParam(pcl_icp_max_iter_param, pcl_icp_max_iter);
+    nh_private.getParam(pcl_icp_rotation_epsilon_param, pcl_icp_rotation_epsilon);
+    nh_private.getParam(pcl_icp_translation_epsilon_param, pcl_icp_translation_epsilon);
+
+
 
     //
     nh_private.getParam(no_move_translation_param, no_move_translation);
@@ -1562,6 +1794,8 @@ int main(int argc, char **argv) {
 
     nh_private.getParam(dump_data_param,dump_data);
 
+
+    nh_private.getParam(wait_extern_pose_param,wait_extern_pose);
 
 
 
@@ -1752,7 +1986,7 @@ int main(int argc, char **argv) {
     bool start_pub_tf = false;
 
     ros::Duration transform_tolerance_;
-    transform_tolerance_.fromSec(1.0);
+    transform_tolerance_.fromSec(0.1);
 
     transform::Transform2d tf_base_laser;
     transform::Transform2d tf_odom_base;
@@ -1810,6 +2044,9 @@ int main(int argc, char **argv) {
     filter_reading_config.radius_rmv_radius = pcl_radius_radius;
     filter_reading_config.radius_rmv_nn = pcl_radius_neighbors;
 
+    filter_reading_config.cond_curve = pcl_cond_curvature;
+
+
     auto &norm_est_config = solver.getNormEstConfig();
     norm_est_config.radius = pcl_norm_radius;
 
@@ -1822,6 +2059,9 @@ int main(int argc, char **argv) {
 
     icp_config.max_match_distance = pcl_icp_max_match_distance;
     icp_config.max_iter = pcl_icp_max_iter;
+    icp_config.rotation_epsilon = pcl_icp_rotation_epsilon;
+    icp_config.transformation_epsilon = pcl_icp_translation_epsilon;
+
 
 
     auto &move_check_config = solver.getMoveCheckConfig();
@@ -1830,6 +2070,10 @@ int main(int argc, char **argv) {
     move_check_config.no_move_rotation_epsilon = no_move_rotation;
     move_check_config.no_move_translation_epsilon = no_move_translation;
     move_check_config.no_move_check_ms = no_move_ms;
+
+    auto icp_rejection_config = solver.getErrorRejectionConfig();
+    icp_rejection_config.max_rotation_jump = icp_reject_rotation_jump;
+    icp_rejection_config.max_translation_jump = icp_reject_translation_jump;
 
 #if 0
     solver.m_filter_reading_config.voxel_grid_size = pcl_voxel_leaf_x;
@@ -1857,13 +2101,18 @@ int main(int argc, char **argv) {
             return 0;
         }
     }
-
+    if((std::strcmp(mode.c_str(), MODE_MAP ) == 0) && !wait_extern_pose ){
+        solver.setOrigin(transform::Transform2d());
+    }
 
     nlohmann::json origin_json;
     transform::Transform2d load_origin_tf;
 
+    bool is_interactive_tf_change = false;
     interactive_tf.setCallBack([&](auto &pose) {
+
         if (solver.isOriginCompute()) {
+            is_interactive_tf_change = true;
             float yaw;
             to_yaw(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w, yaw);
             interactive_origin.set(pose.position.x, pose.position.y, yaw);
@@ -1884,11 +2133,19 @@ int main(int argc, char **argv) {
     common::TaskManager scan_task_manager;
 
     bool is_new_pose_compute = false;
+    bool is_map_update = true;
 
     task_manager.addTask([&] {
 
+        if(!solver.isIcpOk() || !is_new_pose_compute){
+            return true;
+        }
+        PLOGD << "run task debug pointcloud"  << std::endl;
+
         auto solver_cloud_reading = solver.getCloudReading();
         if(!solver_cloud_reading->empty()  ){
+            PLOGD << "cloud_norm_pub.publish(cloud_norm)"  << std::endl;
+
             PclPointCloudToPointCloud2(solver_cloud_reading, cloud_filtered);
             cloud_filtered.header.stamp = scan_time;
             cloud_filtered.header.frame_id.assign(laser_frame);
@@ -1902,27 +2159,37 @@ int main(int argc, char **argv) {
         }
 
 
+        if(is_origin_compute){
+            auto solver_cloud_matched = solver.getCloudMatched();
+            if(!solver_cloud_matched->empty()){
+
+                PLOGD << "cloud_matched_pub.publish(cloud_matched)"  << std::endl;
+
+                PclPointCloudToPointCloud2(solver_cloud_matched, cloud_matched);
+                cloud_matched.header.stamp = scan_time;
+                cloud_matched.header.frame_id.assign(reference_frame);
+                cloud_matched_pub.publish(cloud_matched);
+            }
 
 
-        auto solver_cloud_matched = solver.getCloudMatched();
-        if(!solver_cloud_matched->empty()){
+            if(is_map_update){
+                auto solver_cloud_reference = solver.getCloudReference();
+                if(!solver_cloud_reference->empty()){
+                    PLOGD << "cloud_reference_pub.publish(cloud_reference)"  << std::endl;
 
-            PclPointCloudToPointCloud2(solver_cloud_matched, cloud_matched);
-            cloud_matched.header.stamp = scan_time;
-            cloud_matched.header.frame_id.assign(reference_frame);
-            cloud_matched_pub.publish(cloud_matched);
+                    PclPointCloudToPointCloud2(solver_cloud_reference, cloud_reference);
+                    cloud_reference.header.stamp = ros::Time::now() ;
+                    cloud_reference.header.frame_id.assign(reference_frame);
+                    cloud_reference_pub.publish(cloud_reference);
+
+                }
+                is_map_update = false;
+            }
+
+
         }
 
 
-        auto solver_cloud_reference = solver.getCloudReference();
-        if(!solver_cloud_reference->empty()){
-
-            PclPointCloudToPointCloud2(solver_cloud_reference, cloud_reference);
-            cloud_reference.header.stamp = ros::Time::now() ;
-            cloud_reference.header.frame_id.assign(reference_frame);
-            cloud_reference_pub.publish(cloud_reference);
-
-        }
 
         auto &map_cloud_origin_tf = solver.getOrigin();
 
@@ -1980,8 +2247,6 @@ int main(int argc, char **argv) {
                 }
             }
 
-
-
         }
 
 
@@ -1991,21 +2256,20 @@ int main(int argc, char **argv) {
 
 
         return true;
-    }, 200.0);
-
-
-
-    scan_task_manager.addTask([&]{
+    }, 500.0);
 
 
 
 
 
-        return true;
-        }, 5.0);
+
+    bool solver_need_reset = false;
 
     while (ros::ok()) {
         ros::spinOnce();
+        scan_task_manager.call();
+        task_manager.call();
+
 
         if (!tf_get_base_laser && scan_get_data) {
             try {
@@ -2021,8 +2285,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (scan_get_data) {
-
+        if (tf_get_base_laser && scan_get_data && ! solver_need_reset) {
 
             // 1.0 process sequence
             // 1.1 filter input(map&loc)
@@ -2089,16 +2352,20 @@ int main(int argc, char **argv) {
 
             if (  std::strcmp(mode.c_str(), MODE_MAP) ==0  && get_odom_base_tf) {
                 solver.matchUpdate(tf_odom_base);
+                is_map_update = true;
             }
 
             if (std::strcmp(mode.c_str(), MODE_MAP) ==0  &&  get_map_base_tf) {
                 solver.setRobotAbsolutePoseOrigin(tf_map_base);
 //                start_pub_tf = (  std::strcmp(mode.c_str(), MODE_LOC) ==0   ) ;
+                is_new_pose_compute = true;
 
             }
             if (std::strcmp(mode.c_str(), MODE_LOC) ==0  &&  get_map_base_tf) {
                 solver.setRobotAbsolutePoseInitIcp(tf_map_base);
                 start_pub_tf = (  std::strcmp(mode.c_str(), MODE_LOC) ==0   ) ;
+                is_new_pose_compute = true;
+
             }
 
             if(std::strcmp(mode.c_str(), MODE_LOC) ==0 ){
@@ -2110,9 +2377,9 @@ int main(int argc, char **argv) {
                 // get map odom tf and publish
                 auto &map_odom_tf = solver.solveMapOdom(tf_odom_base);
 
-                std::cout << "map_odom_tf:\n" << map_odom_tf << std::endl;
+//                std::cout << "map_odom_tf:\n" << map_odom_tf << std::endl;
 
-                if (start_pub_tf) {
+                if (start_pub_tf && solver.isIcpOk() ) {
                     temp_transform.setOrigin(tf::Vector3(map_odom_tf.x(), map_odom_tf.y(), 0.0));
                     temp_q.setRPY(0, 0, map_odom_tf.yaw());
                     temp_transform.setRotation(temp_q);
@@ -2127,20 +2394,47 @@ int main(int argc, char **argv) {
 
                     nh.setParam(amcl_tf_broadcast, false);
 
+
+
+
+
+                }else{
+                    nh.setParam(amcl_tf_broadcast, true);
+
                 }
 
 
-                auto &solved_pose = solver.getRobotAbsolutePose();
-                initialpose_msg.pose.pose.position.x = solved_pose.x();
-                initialpose_msg.pose.pose.position.y = solved_pose.y();
+                if(!solver.isIcpOk()){
+                    start_pub_tf = false;
+                    scan_task_manager.addTask([&]{
+                        solver_need_reset = false;
+                        solver.resetIcp();
+                        return false;
+                    }, 1000.0);
+                }
 
-                tf::quaternionTFToMsg(tf::createQuaternionFromYaw(solved_pose.yaw()),
-                                      initialpose_msg.pose.pose.orientation);
-                initialpose_msg.header.stamp = scan_time;
+                if(is_new_pose_compute && solver.isIcpOk()){
+                    auto &solved_pose = solver.getRobotAbsolutePose();
+                    auto &origin_pose = solver.getOrigin();
+                    auto &relative_pose  = solver.getRobotRelativePose();
+                    std::cout << "origin_pose \n" << origin_pose<< "\n";
+                    std::cout << "relative_pose \n" << relative_pose<< "\n";
+                    std::cout << "solved_pose \n" << solved_pose<< "\n";
+                    PLOGD << "icp solved_pose : " << solved_pose << std::endl;
+                    PLOGD << "icp origin_pose : " << origin_pose << std::endl;
+                    PLOGD << "icp relative_pose : " << relative_pose << std::endl;
 
-                icp_pose_pub.publish(initialpose_msg);
+                    initialpose_msg.pose.pose.position.x = solved_pose.x();
+                    initialpose_msg.pose.pose.position.y = solved_pose.y();
 
-                is_new_pose_compute = true;
+                    tf::quaternionTFToMsg(tf::createQuaternionFromYaw(solved_pose.yaw()),
+                                          initialpose_msg.pose.pose.orientation);
+                    initialpose_msg.header.stamp = scan_time;
+
+                    icp_pose_pub.publish(initialpose_msg);
+                }
+
+
 
 
             }
@@ -2244,14 +2538,9 @@ int main(int argc, char **argv) {
             scan_get_data = false;
         } else {
 
-            task_manager.call();
-
-
-
-            if (start_pub_tf) {
-
+            if (start_pub_tf ) {
                 pub_map_odom_tf.stamp_ = ros::Time::now() + transform_tolerance_;
-//                tf_br.sendTransform(pub_map_odom_tf);
+                tf_br.sendTransform(pub_map_odom_tf);
             }
         }
 
@@ -2259,7 +2548,16 @@ int main(int argc, char **argv) {
     }
     nh.setParam(amcl_tf_broadcast, true);
 
-    if(std::strcmp(mode.c_str(), MODE_MAP) ==0 || ((std::strcmp(mode.c_str(), MODE_LOC) ==0) && dump_data) ){
-        solver.dumpToFile(file_dir);
+    if(( (std::strcmp(mode.c_str(), MODE_MAP) ==0)  )|| ((std::strcmp(mode.c_str(), MODE_LOC) ==0) && dump_data && is_interactive_tf_change) ){
+        std::string stamp = common::getCurrentDateTime("%Y-%m-%d-%H-%M-%S");
+
+        int rt = solver.dumpToFile(file_dir,stamp);
+        if(rt == 0){
+            nh_private.setParam(load_dir_param, stamp);
+        }else{
+            nh_private.setParam(load_dir_param, "fail");
+
+        }
+
     }
 }
