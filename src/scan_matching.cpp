@@ -32,6 +32,7 @@
 
 
 #include "common/task.h"
+#include "common/suspend.h"
 #include "sensor/laser_scan.h"
 
 #include <pcl/point_types.h>
@@ -435,7 +436,7 @@ void LaserScanToPclPointCloud(const std::vector<float> &scan_points, int point_n
                               pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr) {
 
 
-    PLOGD <<"point_num: " << point_num << std::endl;
+//    PLOGD <<"point_num: " << point_num << std::endl;
     auto &cloud = *cloud_ptr;
     // Fill in the cloud data
     cloud.width = point_num;
@@ -597,15 +598,15 @@ struct MovementCheck {
 
         movement = last_pose_inv * new_pose;
 
-        PLOGD << "new_pose:\n" << new_pose << std::endl;
-        PLOGD << "movement:\n" << movement << std::endl;
+//        PLOGD << "new_pose:\n" << new_pose << std::endl;
+//        PLOGD << "movement:\n" << movement << std::endl;
 
         bool no_move = std::abs(movement.x()) < no_move_translation_epsilon &&
                        std::abs(movement.y()) < no_move_translation_epsilon
                        && std::abs(movement.yaw()) < no_move_rotation_epsilon;
 
         movement = start_check_pose_inv * new_pose;
-        PLOGD << "movement:\n" << movement << std::endl;
+//        PLOGD << "movement:\n" << movement << std::endl;
 
         no_move = no_move && std::abs(movement.x()) < final_no_move_translation_epsilon &&   std::abs(movement.y()) < final_no_move_translation_epsilon  && std::abs(movement.yaw()) < final_no_move_rotation_epsilon;
 
@@ -937,6 +938,7 @@ public:
     struct ErrorRejectionConfig{
         float max_translation_jump = 0.2;
         float max_rotation_jump = 0.2;
+        float match_ratio = 0.2;
 
     };
 
@@ -1226,7 +1228,7 @@ public:
         }
         m_pl_te->setWeights(m_pl_te_weights);
 #endif
-        PLOGD << "t_reading size = " << t_reading->size() << std::endl;
+//        PLOGD << "t_reading size = " << t_reading->size() << std::endl;
         m_pl_icp.setInputSource(t_reading);
         m_pl_icp.setInputTarget(t_cloud);
         m_pl_icp.align(*t_align, initial_guess);
@@ -1245,11 +1247,10 @@ public:
         est_pose.matrix[2][1] = 0.0;
         est_pose.matrix[2][2] = 1.0;
 
-        std::cout << "m_pl_icp has converged:" << m_pl_icp.hasConverged() << " score: " <<
-                  m_pl_icp.getFitnessScore() << std::endl;
-        std::cout << "getFinalTransformation:\n" << m_pl_icp.getFinalTransformation() << "\n";
+//        std::cout << "m_pl_icp has converged:" << m_pl_icp.hasConverged() << " score: " << m_pl_icp.getFitnessScore() << std::endl;
+//        std::cout << "getFinalTransformation:\n" << m_pl_icp.getFinalTransformation() << "\n";
 
-        PLOGD << "m_pl_icp getFinalTransformation:\n" << m_pl_icp.getFinalTransformation() << std::endl;
+//        PLOGD << "m_pl_icp getFinalTransformation:\n" << m_pl_icp.getFinalTransformation() << std::endl;
 
         return m_pl_icp.getFitnessScore();
 
@@ -1292,11 +1293,9 @@ public:
         est_pose.matrix[2][1] = 0.0;
         est_pose.matrix[2][2] = 1.0;
 
-        std::cout << "m_joint_pl_icp has converged:" << m_joint_pl_icp.hasConverged() << " score: " <<
-                                                                                                    m_joint_pl_icp.getFitnessScore() << std::endl;
-        std::cout << "getFinalTransformation:\n" << m_joint_pl_icp.getFinalTransformation() << "\n";
-
-        PLOGD << "m_joint_pl_icp getFinalTransformation:\n" << m_joint_pl_icp.getFinalTransformation() << std::endl;
+//        std::cout << "m_joint_pl_icp has converged:" << m_joint_pl_icp.hasConverged() << " score: " << m_joint_pl_icp.getFitnessScore() << std::endl;
+//        std::cout << "getFinalTransformation:\n" << m_joint_pl_icp.getFinalTransformation() << "\n";
+//        PLOGD << "m_joint_pl_icp getFinalTransformation:\n" << m_joint_pl_icp.getFinalTransformation() << std::endl;
 
         return m_joint_pl_icp.getFitnessScore();
 
@@ -1352,8 +1351,8 @@ public:
         pcl::IndicesPtr indices (new pcl::Indices (removed_idx.size()));
         pcl::IndicesPtr indices_input (new pcl::Indices (removed_idx_input.size()));
 
-        PLOGD << "remove indices: " << removed_idx.size() << std::endl;
-        PLOGD << "remove indices_input: " << removed_idx_input.size() << std::endl;
+//        PLOGD << "remove indices: " << removed_idx.size() << std::endl;
+//        PLOGD << "remove indices_input: " << removed_idx_input.size() << std::endl;
 
         int i = 0;
         for(auto e:removed_idx){
@@ -1482,11 +1481,11 @@ public:
 
         if (!cloud_reference->empty()) {
             if (!m_movement_check.isStill()) {
-                std::cout << " perform icp\n";
+//                std::cout << " perform icp\n";
                 float score = icp_match(cloud_reading_filtered_norm, cloud_reference, cloud_align,
                                         sensor_absolute_pose);
             } else {
-                std::cout << " bypass icp\n";
+//                std::cout << " bypass icp\n";
 
                 Eigen::Matrix4f initial_guess(Eigen::Matrix4f::Identity ());
                 initial_guess(0, 0) = sensor_absolute_pose.matrix[0][0];
@@ -1539,6 +1538,8 @@ public:
 
 //            PLOGD << "sensor_absolute_pose before icp : " << sensor_absolute_pose << std::endl;
             sensor_absolute_pose_last = sensor_absolute_pose;
+//            PLOGD << "cloud_reading_filtered_norm.size: " << cloud_reading_filtered_norm->size() << ", cloud_reference.size: " << cloud_reference->size() << std::endl;
+
 
 //            icp_match_v2(cloud_reading_filtered_norm, cloud_reference, cloud_align, sensor_absolute_pose);
             float score = icp_match(cloud_reading_filtered_norm, cloud_reference, cloud_align, sensor_absolute_pose);
@@ -1599,10 +1600,12 @@ public:
 
                 }
 
-                float match_ratio = float(match_num)/float(point_num);
-                PLOGD <<"match_num: "<< match_num << ", point_num: " << point_num << ", match_ratio: " << match_ratio<< std::endl;
+                float match_ratio_reading = float(match_num)/float(point_num);
+                float match_ratio_reference = float(match_num)/float(cloud_reference->size());
 
-                if(match_ratio < 0.5){
+//                PLOGD <<"match_num: "<< match_num << ", point_num: " << point_num << ", match_ratio_reading: " << match_ratio_reading << ", match_ratio_reference: "<< match_ratio_reference<< std::endl;
+
+                if( (match_ratio_reading < m_error_rejection_config.match_ratio) || (match_ratio_reference < m_error_rejection_config.match_ratio) ){
 
                     is_icp_fault = true;
                     sensor_absolute_pose = sensor_absolute_pose_last;
@@ -1642,7 +1645,7 @@ public:
 
         float score = icp_match(cloud_reading_filtered_norm, cloud_reference, cloud_align, sensor_absolute_pose);
 
-        std::cout << "sensor_absolute_pose:\n" << sensor_absolute_pose << std::endl;
+//        std::cout << "sensor_absolute_pose:\n" << sensor_absolute_pose << std::endl;
 #if 0
         updateReference(cloud_align);
 #endif
@@ -1742,7 +1745,11 @@ public:
 
         // input_cloud ->filter -> filtered_input_cloud
         filterReading(t_cloud_reading, cloud_reading_filtered);
+        if(cloud_reading_filtered->empty()){
+            return;
+        }
 
+        //origin
 #if 1
         // filtered_input_cloud + norm for icp
         computeNorm(cloud_reading_filtered, temp_cloud_norm);
@@ -1750,6 +1757,15 @@ public:
         //
         removeReadingShadow(temp_cloud_norm, cloud_reading_filtered_norm);
 #endif
+
+#if 0
+        // filtered_input_cloud + norm for icp
+        computeNorm(cloud_reading_filtered, cloud_reading_filtered_norm);
+
+        //
+//        removeReadingShadow(temp_cloud_norm, cloud_reading_filtered_norm);
+#endif
+
 
 #if 0
         // filtered_input_cloud + norm for icp
@@ -1968,6 +1984,12 @@ int main(int argc, char **argv) {
     ros::NodeHandle nh;
     ros::NodeHandle nh_private("~");
 
+    float sleep_time = 50.0;
+    const char* sleep_time_param = "sleep_time";
+
+    float tf_wait_time = 0.08;
+    const char* tf_wait_time_param = "sleep_time";
+
 
     std::string file_dir = "data";
     const char* file_dir_param = "file_dir";
@@ -2041,6 +2063,9 @@ int main(int argc, char **argv) {
     const char* pcl_icp_rotation_epsilon_param = "pcl_icp_rotation_epsilon";
     const char* pcl_icp_translation_epsilon_param = "pcl_icp_translation_epsilon";
 
+    float pcl_icp_ransac_outlier = 0.06;
+    const char * pcl_icp_ransac_outlier_param = "pcl_icp_ransac_outlier";
+
 
     float no_move_translation = 5e-3;
     float no_move_rotation = 5e-3;
@@ -2068,6 +2093,9 @@ int main(int argc, char **argv) {
     const char* icp_reject_translation_jump_param = "icp_reject_translation_jump";
     const char* icp_reject_rotation_jump_param = "icp_reject_rotation_jump";
 
+    nh_private.getParam(sleep_time_param, sleep_time);
+
+    nh_private.getParam(tf_wait_time_param, tf_wait_time);
 
     nh_private.getParam(scan_filter_len_param, scan_filter_len);
     nh_private.getParam(scan_filter_stddev_param, scan_filter_stddev);
@@ -2104,6 +2132,7 @@ int main(int argc, char **argv) {
     nh_private.getParam(pcl_icp_max_iter_param, pcl_icp_max_iter);
     nh_private.getParam(pcl_icp_rotation_epsilon_param, pcl_icp_rotation_epsilon);
     nh_private.getParam(pcl_icp_translation_epsilon_param, pcl_icp_translation_epsilon);
+    nh_private.getParam(pcl_icp_ransac_outlier_param, pcl_icp_ransac_outlier);
 
 
 
@@ -2312,6 +2341,7 @@ int main(int argc, char **argv) {
     tf::StampedTransform pub_reference_origin_tf;
 
     bool start_pub_tf = false;
+    bool map_odom_tf_computed = false;
 
     ros::Duration transform_tolerance_;
     transform_tolerance_.fromSec(tf_stamp_tolerance_seconds);
@@ -2386,7 +2416,7 @@ int main(int argc, char **argv) {
 
         scan_get_data = scan_handler.range_valid_num > 100;
 
-        PLOGD << "movement_check.isStill(): " << movement_check.isStill() <<", range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
+//        PLOGD << "movement_check.isStill(): " << movement_check.isStill() <<", range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
 
 #endif
 
@@ -2433,6 +2463,7 @@ int main(int argc, char **argv) {
     icp_config.max_iter = pcl_icp_max_iter;
     icp_config.rotation_epsilon = pcl_icp_rotation_epsilon;
     icp_config.transformation_epsilon = pcl_icp_translation_epsilon;
+    icp_config.ransac_outlier = pcl_icp_ransac_outlier;
 
 
 
@@ -2481,14 +2512,20 @@ int main(int argc, char **argv) {
     transform::Transform2d load_origin_tf;
 
     bool is_interactive_tf_change = false;
+    bool is_map_update = true;
+
     interactive_tf.setCallBack([&](auto &pose) {
 
         if (solver.isOriginCompute()) {
             is_interactive_tf_change = true;
+            is_map_update = true;
             float yaw;
             to_yaw(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w, yaw);
             interactive_origin.set(pose.position.x, pose.position.y, yaw);
             solver.setOrigin(interactive_origin);
+
+            robot_pose_array.poses.clear();
+
         }
 
     });
@@ -2505,7 +2542,6 @@ int main(int argc, char **argv) {
     common::TaskManager scan_task_manager;
 
     bool is_new_pose_compute = false;
-    bool is_map_update = true;
 
     task_manager.addTask([&] {
 
@@ -2568,11 +2604,15 @@ int main(int argc, char **argv) {
 
 
 
-        if (solver.isOriginCompute() && !is_origin_compute) {
+        if (solver.isOriginCompute() && !is_origin_compute   ) {
             is_origin_compute = true;
-            interactive_tf.setInitPose(map_cloud_origin_tf.x(), map_cloud_origin_tf.y(),
-                                       map_cloud_origin_tf.yaw());
-            interactive_tf.start(1.0, false);
+
+            if(!(std::strcmp(mode.c_str(), MODE_LOC) ==0  && !dump_data)){
+
+                interactive_tf.setInitPose(map_cloud_origin_tf.x(), map_cloud_origin_tf.y(),
+                                           map_cloud_origin_tf.yaw());
+                interactive_tf.start(1.0, false);
+            }
             robot_pose_array.poses.clear();
         }
 
@@ -2619,13 +2659,6 @@ int main(int argc, char **argv) {
             }
 
         }
-
-
-
-
-
-
-
         return true;
     }, 500.0);
 
@@ -2635,12 +2668,20 @@ int main(int argc, char **argv) {
 
 
     bool solver_need_reset = false;
+#if 0
+    task_manager.addTask([&]{
+        return true;
+    },50.0);
+#endif
+
+    common::Suspend suspend;
 
     while (ros::ok()) {
         ros::spinOnce();
+#if 1
         scan_task_manager.call();
         task_manager.call();
-
+#endif
 
         if (!tf_get_base_laser && scan_get_data) {
             try {
@@ -2688,15 +2729,13 @@ int main(int argc, char **argv) {
 
             }
 
-            std::cout << "preprocess time : " << common::ToMillSeconds(common::FromUnixNow() - t1) << " ms"
-                      << std::endl;
 
 
             get_odom_base_tf = false;
             get_map_base_tf = false;
             // lookup odom base_link
             try {
-                tl_.waitForTransform(odom_frame, base_frame, scan_time, ros::Duration(0.05));
+                tl_.waitForTransform(odom_frame, base_frame, scan_time, ros::Duration(tf_wait_time));
 
                 tl_.lookupTransform(odom_frame, base_frame, scan_time, transform);
                 tf_get_odom_base = true;
@@ -2709,7 +2748,7 @@ int main(int argc, char **argv) {
             }
 
             try {
-                tl_.waitForTransform(map_frame, base_frame, scan_time, ros::Duration(0.05));
+                tl_.waitForTransform(map_frame, base_frame, scan_time, ros::Duration(tf_wait_time));
 
                 tl_.lookupTransform(map_frame, base_frame, scan_time, transform);
                 tf_map_base.set(transform.getOrigin().x(), transform.getOrigin().y(),
@@ -2720,11 +2759,13 @@ int main(int argc, char **argv) {
                 ROS_ERROR("%s", ex.what());
             }
 
+            if(get_odom_base_tf){
+                movement_check.check(tf_odom_base);
+            }
 
             if (  std::strcmp(mode.c_str(), MODE_MAP) ==0  && get_odom_base_tf) {
-                movement_check.check(tf_odom_base);
 
-                PLOGD << "try add data to map: " << movement_check.isStill() << ", " << new_scan_filtered << std::endl;
+//                PLOGD << "try add data to map: " << movement_check.isStill() << ", " << new_scan_filtered << std::endl;
                 if(movement_check.isStill() && new_scan_filtered){
                     solver.matchUpdate();
 //                    rangesFilter.clear();
@@ -2760,6 +2801,11 @@ int main(int argc, char **argv) {
 //                std::cout << "map_odom_tf:\n" << map_odom_tf << std::endl;
 
                 if (start_pub_tf  ) {
+                    if(map_odom_tf_computed && !get_odom_base_tf){
+                        pub_map_odom_tf.stamp_ = ros::Time::now() + transform_tolerance_;
+                        tf_br.sendTransform(pub_map_odom_tf);
+                        continue;
+                    }
                     auto &map_odom_tf = solver.solveMapOdom(tf_odom_base);
 
                     temp_transform.setOrigin(tf::Vector3(map_odom_tf.x(), map_odom_tf.y(), 0.0));
@@ -2776,7 +2822,7 @@ int main(int argc, char **argv) {
                     tf_br.sendTransform(pub_map_odom_tf);
 
                     nh.setParam(amcl_tf_broadcast, false);
-
+                    map_odom_tf_computed = true;
 
 
 
@@ -2824,101 +2870,8 @@ int main(int argc, char **argv) {
 
             }
 
+//            std::cout << "preprocess time : " << common::ToMillSeconds(common::FromUnixNow() - t1) << " ms"  << std::endl;
 
-
-#if 0
-            //            LaserScanToPclPointCloud(scan_handler.local_xy_points,scan_handler.range_valid_num, pcl_cloud_norm);
-
-
-
-            approximateVoxelGrid.setInputCloud(pcl_cloud_raw);
-            approximateVoxelGrid.filter(*pcl_cloud_voxel);
-            radiusOutlierRemoval.setInputCloud(pcl_cloud_voxel);
-            radiusOutlierRemoval.filter(*pcl_cloud_radius);
-
-            PclPointCloudToPointCloud2(pcl_cloud_radius, cloud_filtered);
-
-            tmp_icp.mul(scan_handler.local_xy_points, scan_handler.global_xy_points);
-            LaserScanToPclPointCloud(scan_handler.global_xy_points, scan_handler.range_valid_num, pcl_cloud_voxel);
-
-//            pcl_cloud_voxel->is_dense = true;
-//            pcl_cloud_radius->is_dense = true;
-
-            // Target =    initial_guess*Source
-            // map = pose * reading
-            icp.setInputSource(pcl_cloud_radius);
-            icp.setInputTarget(pcl_cloud_voxel);
-            icp.align(Final, initial_guess);
-            std::cout << "icp has converged:" << icp.hasConverged() << " score: " <<
-                      icp.getFitnessScore() << std::endl;
-            std::cout << icp.getFinalTransformation() << std::endl;
-            std::cout << "tmp_icp: " << tmp_icp << std::endl;
-
-
-
-
-
-
-//            pcl::transformPointCloud (*data, *tmp, initial_guess);
-
-
-            pcl::copyPointCloud(*pcl_cloud_radius, *pcl_cloud_norm);
-            norm_estim.setInputCloud(pcl_cloud_radius);
-            norm_estim.compute(pcl_cloud_norm);
-            pcl::copyPointCloud(*pcl_cloud_voxel, *pcl_cloud_norm_ref);
-
-            norm_estim.setInputCloud(pcl_cloud_voxel);
-            norm_estim.compute(pcl_cloud_norm_ref);
-
-            pl_icp.setInputSource(pcl_cloud_norm);
-            pl_icp.setInputTarget(pcl_cloud_norm_ref);
-            pl_icp.align(Final_Norm, initial_guess);
-            std::cout << "pl_icp has converged:" << pl_icp.hasConverged() << " score: " <<
-                      pl_icp.getFitnessScore() << std::endl;
-            std::cout << pl_icp.getFinalTransformation() << std::endl;
-
-
-            std::cout << "preprocess time : " << common::ToMillSeconds(common::FromUnixNow() - t1) << " ms"
-                      << std::endl;
-
-
-            cloud_filtered.header.stamp = scan_time;
-            cloud_filtered.header.frame_id.assign(laser_frame);
-            cloud_filtered_pub.publish(cloud_filtered);
-#endif
-
-
-#if 0
-            cloud_norm.poses.resize(pcl_cloud_norm->points.size());
-
-            float yaw = 0.0;
-//            std::cout << "\nshow all yaw:\n";
-            for (int i = 0; i < cloud_norm.poses.size(); i++) {
-                cloud_norm.poses[i].position.x = pcl_cloud_norm->points[i].x;
-                cloud_norm.poses[i].position.y = pcl_cloud_norm->points[i].y;
-                cloud_norm.poses[i].position.z = pcl_cloud_norm->points[i].z;
-
-                cloud_norm.poses[i].orientation.x = 0.0;
-                cloud_norm.poses[i].orientation.y = 0.0;
-                cloud_norm.poses[i].orientation.z = 0.0;
-                cloud_norm.poses[i].orientation.w = 1.0;
-
-
-                yaw = atan2(pcl_cloud_norm->points[i].normal_y, pcl_cloud_norm->points[i].normal_x);
-//                std::cout << "[" << yaw << ", " << pcl_cloud_norm->points[i].normal_y << ", " << pcl_cloud_norm->points[i].normal_x << "], ";
-                yaw_to_quaternion(yaw, cloud_norm.poses[i].orientation.x, cloud_norm.poses[i].orientation.y,
-                                  cloud_norm.poses[i].orientation.z, cloud_norm.poses[i].orientation.w);
-
-            }
-//            std::cout << "end all yaw:\n" << std::endl;
-
-
-            cloud_norm.header.stamp = scan_time;
-
-            cloud_norm.header.frame_id.assign(laser_frame);
-
-            cloud_norm_pub.publish(cloud_norm);
-#endif
 
             scan_get_data = false;
         } else {
@@ -2928,10 +2881,12 @@ int main(int argc, char **argv) {
 
                 if(pub_stamp > pub_map_odom_tf.stamp_){
                     pub_map_odom_tf.stamp_ =pub_stamp;
-                    PLOGD << "2 pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
+//                    PLOGD << "2 pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
                     tf_br.sendTransform(pub_map_odom_tf);
                 }
             }
+
+            suspend.sleep(sleep_time);
         }
 
 
