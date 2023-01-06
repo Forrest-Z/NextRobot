@@ -34,7 +34,14 @@
 #include "common/suspend.h"
 #include "sensor/laser_scan.h"
 
-#include <RansacLib/ransac.h>
+#define OPTIM_ENABLE_EIGEN_WRAPPERS
+#include "optim.hpp"
+
+//#include <autodiff/forward/real.hpp>
+//#include <autodiff/forward/real/eigen.hpp>
+
+#include <autodiff/reverse/var.hpp>
+#include <autodiff/reverse/var/eigen.hpp>
 /*
 
 
@@ -46,6 +53,50 @@ struct Point{
     float z = 0.0;
     float r = 0.0;
 };
+
+autodiff::var
+circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<Point>& points,int point_num, float radius_2)
+{
+    autodiff::var r = 0.0;
+    autodiff::var t = 0.0;
+
+    for(int i = 0 ; i < point_num ;i++){
+        t = (x(0) - points[i].x)*(x(0) - points[i].x) + (x(1) - points[i].y)*(x(1) - points[i].y) - radius_2;
+        r += t*t;
+    }
+    return r;
+}
+
+struct CircleCostFunction{
+
+    const std::vector<Point>& points;
+    int point_num;
+    float radius = 0.1;
+    float radius_2 = radius;
+
+
+    CircleCostFunction(const std::vector<Point>& t_points, int t_point_num, float t_radius):points(t_points),point_num(t_point_num), radius(t_radius),radius_2(radius*radius){
+    }
+
+
+
+    double operator()(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
+    {
+
+        autodiff::ArrayXvar xd = x.eval();
+
+        autodiff::var y = circle_opt_fnd(xd,points,point_num,radius_2);
+
+        if (grad_out) {
+            Eigen::VectorXd grad_tmp = autodiff::gradient(y, xd);
+
+            *grad_out = grad_tmp;
+        }
+
+        return autodiff::val(y);
+    }
+};
+
 
 /*
  box filter
@@ -183,57 +234,6 @@ void LaserScanSegment( std::vector<Point>& filter_points, std::vector<std::vecto
 
 }
 
-bool circleLeastFit(const std::vector<Point> &points, float &center_x, float &center_y, float &radius)
-{
-    center_x = 0.0f;
-    center_y = 0.0f;
-    radius = 0.0f;
-    if (points.size() < 3)
-    {
-        return false;
-    }
-
-    double sum_x = 0.0f, sum_y = 0.0f;
-    double sum_x2 = 0.0f, sum_y2 = 0.0f;
-    double sum_x3 = 0.0f, sum_y3 = 0.0f;
-    double sum_xy = 0.0f, sum_x1y2 = 0.0f, sum_x2y1 = 0.0f;
-
-    int N = points.size();
-    for (int i = 0; i < N; i++)
-    {
-        double x = points[i].x;
-        double y = points[i].y;
-        double x2 = x * x;
-        double y2 = y * y;
-        sum_x += x;
-        sum_y += y;
-        sum_x2 += x2;
-        sum_y2 += y2;
-        sum_x3 += x2 * x;
-        sum_y3 += y2 * y;
-        sum_xy += x * y;
-        sum_x1y2 += x * y2;
-        sum_x2y1 += x2 * y;
-    }
-
-    double C, D, E, G, H;
-    double a, b, c;
-
-    C = N * sum_x2 - sum_x * sum_x;
-    D = N * sum_xy - sum_x * sum_y;
-    E = N * sum_x3 + N * sum_x1y2 - (sum_x2 + sum_y2) * sum_x;
-    G = N * sum_y2 - sum_y * sum_y;
-    H = N * sum_x2y1 + N * sum_y3 - (sum_x2 + sum_y2) * sum_y;
-    a = (H * D - E * G) / (C * G - D * D);
-    b = (H * C - E * D) / (D * D - G * C);
-    c = -(a * sum_x + b * sum_y + sum_x2 + sum_y2) / N;
-
-    center_x = a / (-2);
-    center_y = b / (-2);
-    radius = sqrt(a * a + b * b - 4 * c) / 2;
-    return true;
-}
-
 //float NormaliseAngle(float angle, float mean){
 //    while( std::abs(angle - mean) > M_PI)
 //}
@@ -318,47 +318,27 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
 
     PLOGD << "check error_mean: " << error_mean << std::endl;
-    return  ;
 
 
 
+    Eigen::VectorXd x(2);
+    x << cx, cy;
 
+    CircleCostFunction opt_fn_obj(points,valid_num, radius) ;
 
-    PLOGD << "update cx cy" << std::endl;
-    float update_step = 0.001;
+    bool success = optim::bfgs(x, opt_fn_obj, nullptr);
 
-    int iteration_step = 50;
-    float update_step_decay = update_step/(2*iteration_step);
-
-    float dx = 0.0, dy = 0.0;
-    for(int j = 0; j < iteration_step;j++){
-        dx = 0.0;
-        dy = 0.0;
-        for(int i = 0 ; i <valid_num;i++){
-            auto& p = points[i];
-
-            float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-            float e = radius -d;
-//            PLOGD << "d: " << d << ", e: " << e<< std::endl;
-
-//            e = std::abs(e) > 0.02? 1.0*e: 2.0*e;
-//            dx += e*update_step*ux;
-//            dy += e*update_step*uy;
-//            e = 0.005/e;
-            e = std::abs(e) > 0.02? 10.0* e: 15.0*e;
-            dx +=  e*update_step*std::abs(p.x - cx);
-            dy +=  e*update_step*std::abs(p.y - cy);
-
-//            PLOGD << "dx: " << dx << ", dy: " << dy<< std::endl;
-
-        }
-//        PLOGD << "dx: " << dx << ", dy: " << dy<< std::endl;
-
-        cx += dx;
-        cy += dy;
-        update_step -= update_step_decay;
-
+    if (success) {
+        std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
+    } else {
+        std::cout << "bfgs: reverse-mode autodiff test completed unsuccessfully.\n" << std::endl;
     }
+
+    std::cout << "solution: x = \n" << x << std::endl;
+
+    cx = x(0);
+    cy = x(1);
+
     error_sum = 0.0;
     for(int i = 0 ; i <valid_num;i++){
         auto& p = points[i];
@@ -369,22 +349,12 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
 
     PLOGD << "check error: " << error_sum/float(valid_num) << std::endl;
+
+    return  ;
 
     center_x = cx;
     center_y = cy;
-#if 0
-    circleLeastFit(points,center_x,cx, cy);
-    error_sum = 0.0;
-    for(int i = 0 ; i <valid_num;i++){
-        auto& p = points[i];
-        float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-        std::cout << d << ", ";
-        error_sum += std::abs(d- radius) ;
-    }
-    PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
 
-    PLOGD << "check error: " << error_sum/float(valid_num) << std::endl;
-#endif
 }
 
 
@@ -396,8 +366,50 @@ struct DetectTarget{
     float match_error;
 };
 
+#if 0
+// The multi-variable function for which derivatives are needed
+autodiff::real f(autodiff::real x, autodiff::real y, autodiff::real z)
+{
+    return 1 + x + y + z + x*y + y*z + x*z + x*y*z + exp(x/y + y/z);
+}
+// The multi-variable function for which derivatives are needed
+autodiff::var f2(autodiff::var x, autodiff::var y, autodiff::var z)
+{
+    return 1 + x + y + z + x*y + y*z + x*z + x*y*z + exp(x/y + y/z);
+}
+#endif
+
+autodiff::var
+opt_fnd(const autodiff::ArrayXvar& x)
+{
+    return (x(0) - 1.0)*(x(0) - 1.0)
+    + (x(1) - 1.5)*(x(1) - 1.5)
+      + (x(2) - 1.8)*(x(2) - 1.8)
+    ;
+}
+
+
+double
+opt_fn(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
+{
+
+    autodiff::ArrayXvar xd = x.eval();
+
+    autodiff::var y = opt_fnd(xd);
+
+    if (grad_out) {
+        Eigen::VectorXd grad_tmp = autodiff::gradient(y, xd);
+
+        *grad_out = grad_tmp;
+    }
+
+    return autodiff::val(y);
+}
+
+
 
 int main(int argc, char** argv){
+
 
     plog::RollingFileAppender<plog::CsvFormatter> fileAppender("scan_circle.csv", 800000, 10); // Create the 1st appender.
     plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender; // Create the 2nd appender.
@@ -665,28 +677,45 @@ int main(int argc, char** argv){
             }
 
             std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
-                return v1.match_error < v2.match_error;
+                return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
             });
+
+            int best_result_id = 0;
+            while(find_result[best_result_id].match_error > 0.02){
+
+                best_result_id++;
+                if(best_result_id == find_result.size()){
+                    best_result_id = -1;
+                    break;
+                }
+            }
+            if(best_result_id == -1){
+                PLOGD << "find circle fail " << std::endl;
+
+                continue;
+            }
+            auto best_result = find_result[best_result_id];
+
             PLOGD << "control_target_angle: " << control_target_angle << std::endl;
             PLOGD << "control_target_distance: " << control_target_distance << std::endl;
-            PLOGD << "target pose in base ,  " << find_result[0].pose_in_base[0] << ", " << find_result[0].pose_in_base[1] << std::endl;
+            PLOGD << "target pose in base ,  " << best_result.pose_in_base[0] << ", " << best_result.pose_in_base[1] << std::endl;
 
 
             marker_array_msg.markers[0].header.stamp = scan_time;
             marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
-            marker_array_msg.markers[0].pose.position.x =find_result[0].pose_in_laser[0];
-            marker_array_msg.markers[0].pose.position.y =find_result[0].pose_in_laser[1];
+            marker_array_msg.markers[0].pose.position.x =best_result.pose_in_laser[0];
+            marker_array_msg.markers[0].pose.position.y =best_result.pose_in_laser[1];
             marker_array_msg.markers[0].id = 1;
 
             cloud_target_pub.publish(marker_array_msg);
 
 
 
-            float angle_diff = std::atan2(find_result[0].pose_in_base[1],find_result[0].pose_in_base[0] );
+            float angle_diff = std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0] );
 
             angle_diff -= control_target_angle;
 
-            float distance_diff = std::sqrt(find_result[0].pose_in_base[0]*find_result[0].pose_in_base[0] + find_result[0].pose_in_base[1]*find_result[0].pose_in_base[1] );
+            float distance_diff = std::sqrt(best_result.pose_in_base[0]*best_result.pose_in_base[0] + best_result.pose_in_base[1]*best_result.pose_in_base[1] );
 
 
             distance_diff -= control_target_distance;
@@ -703,7 +732,7 @@ int main(int argc, char** argv){
                 cmd_vel_msg.linear.x = 0.0;
 
             }else{
-                if(find_result[0].pose_in_base[0] > 0.0 ){
+                if(best_result.pose_in_base[0] > 0.0 ){
 
                     if(distance_diff>0.0){
                         cmd_vel_msg.linear.x = 0.1;
@@ -742,7 +771,7 @@ int main(int argc, char** argv){
             // radius filter
             // compute target center
 
-
+            scan_get_data = false;
 
         }else{
             suspend.sleep(sleep_time);
