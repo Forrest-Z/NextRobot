@@ -704,7 +704,7 @@ namespace pcl{
 
         }
 
-        void compute( const pcl::PointCloud<pcl::PointNormal>::Ptr&  output){
+        void compute( const pcl::PointCloud<pcl::PointNormal>::Ptr&  output, float viewpoint_x, float viewpoint_y){
 
             int input_point_num = m_input_cloud->points.size();
             output->points.resize(input_point_num,pcl::PointNormal(0.0,0.0,0.0,0.0,0.0,0.0));
@@ -790,6 +790,8 @@ namespace pcl{
                     auto& nx =  output->points[i].normal_x;
                     auto& ny =  output->points[i].normal_y;
                     auto& nz =  output->points[i].normal_z;
+                    auto& c =  output->points[i].curvature;
+
                     nx = eigen_vectors(0,0);
                     ny = eigen_vectors(1,0);
 #if 0
@@ -804,7 +806,7 @@ namespace pcl{
                     nz = 0.0;
 
                     Eigen::Matrix <float, 2, 1> normal (nx, ny);
-                    Eigen::Matrix <float, 2, 1> vp ( - query_point.x, - query_point.y);
+                    Eigen::Matrix <float, 2, 1> vp (viewpoint_x - query_point.x, viewpoint_y - query_point.y);
 
                     // Dot product between the (viewpoint - point) and the plane normal
                     float cos_theta = vp.dot (normal);
@@ -815,6 +817,7 @@ namespace pcl{
                         ny *= -1;
                     }
 
+                    c = std:: acos(std::abs(cos_theta));
 
 //                    std::cout << __LINE__ << "eigenvalues:\n" << eigen_values << std::endl;
 //                    std::cout << __LINE__ << "eigenvectors:\n" << eigen_vectors << std::endl;
@@ -1688,7 +1691,9 @@ public:
             return -1;
         }
 
+        cloud_align->clear();
         is_origin_computed = true;
+        is_icp_init = false;
         resetIcp();
 
 
@@ -1970,6 +1975,57 @@ private:
 
 };
 
+
+struct MissionManager{
+    int run_command = 0;
+    int start_run = 0;
+    std::function<void()> start_command_callback;
+    std::function<void()> stop_command_callback;
+    std::function<void()> start_run_callback;
+    std::function<void()> stop_run_callback;
+
+    void command(int t_run){
+
+        if(t_run && ! run_command){
+            run_command = t_run;
+            start_run = 1;
+            if(start_command_callback){
+                start_command_callback();
+            }
+        }
+
+        if(!t_run && run_command){
+            run_command = t_run;
+            start_run = 0;
+            if(stop_command_callback){
+                stop_command_callback();
+            }
+        }
+
+    }
+    int isStartTrigger(){
+        return start_run;
+    }
+    int isCommandTrigger(){
+        return run_command;
+    }
+    void respond(int t_result){
+        if(t_result && ! start_run){
+            start_run = t_result;
+            if(start_run_callback){
+                start_run_callback();
+            }
+        }
+
+        if(!t_result && start_run){
+            start_run = t_result;
+            if(stop_run_callback){
+                stop_run_callback();
+            }
+        }
+    }
+};
+
 int main(int argc, char **argv) {
 
     plog::RollingFileAppender<plog::CsvFormatter> fileAppender("scan_matching.csv", 800000, 10); // Create the 1st appender.
@@ -2172,7 +2228,7 @@ int main(int argc, char **argv) {
     // PointCloud2
     // tf: map_to_odom
 
-    bool tf_compute_map_odom = false;
+//    bool tf_compute_map_odom = false;
     ros::Publisher cloud_filtered_pub = nh.advertise<sensor_msgs::PointCloud2>(cloud_filtered_topic, 1);
     ros::Publisher cloud_reference_pub = nh.advertise<sensor_msgs::PointCloud2>(cloud_reference_topic, 1);
     ros::Publisher cloud_matched_pub = nh.advertise<sensor_msgs::PointCloud2>(cloud_matched_topic, 1);
@@ -2325,7 +2381,7 @@ int main(int argc, char **argv) {
 
     bool scan_get_data = false;
     bool tf_get_base_laser = false;
-    bool tf_get_odom_base = false;
+//    bool tf_get_odom_base = false;
 
     sensor::ScanToPoints scan_handler;
 
@@ -2351,7 +2407,13 @@ int main(int argc, char **argv) {
     transform::Transform2d tf_map_base;
 
 
-    std::string amcl_tf_broadcast = "/amcl/tf_broadcast";
+    const char* amcl_tf_broadcast = "/amcl/tf_broadcast";
+    const char* status_param = "status";
+    const char* run_param = "run";
+    int run_command = 0;
+    int run_command_last = 0;
+    int start_run = 0;
+
 
 
     std::string base_frame = "base_link";
@@ -2426,6 +2488,8 @@ int main(int argc, char **argv) {
 
     ros::Subscriber sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, laser_cb);
     nh.setParam(amcl_tf_broadcast, true);
+    nh_private.setParam(status_param,0);
+
 
 
     transform::Transform2d tmp_icp(0.1, 0.05, 0.08);
@@ -2474,7 +2538,7 @@ int main(int argc, char **argv) {
     move_check_config.no_move_translation_epsilon = no_move_translation;
     move_check_config.no_move_check_ms = no_move_ms;
 
-    auto icp_rejection_config = solver.getErrorRejectionConfig();
+    auto& icp_rejection_config = solver.getErrorRejectionConfig();
     icp_rejection_config.max_rotation_jump = icp_reject_rotation_jump;
     icp_rejection_config.max_translation_jump = icp_reject_translation_jump;
 
@@ -2494,16 +2558,37 @@ int main(int argc, char **argv) {
 
 
     solver.config();
-    if(std::strcmp(mode.c_str(), MODE_LOC ) == 0){
 
-        int rt = solver.loadFromFile(file_dir, load_dir);
+    bool is_map_update = true;
 
-        if(rt == -1){
-            std::cerr << "solver load file error, exit" << std::endl;
+    auto load_solver_map = [&]{
+        if(std::strcmp(mode.c_str(), MODE_LOC ) == 0){
 
+            nh_private.getParam(file_dir_param, file_dir);
+            nh_private.getParam(load_dir_param, load_dir);
+
+            int rt = solver.loadFromFile(file_dir, load_dir);
+
+            if(rt == -1){
+                nh_private.setParam(status_param,-2);
+
+                std::cerr << "solver load file error, exit" << std::endl;
+
+                return -1;
+            }else{
+                is_map_update = true;
+                start_pub_tf = false;
+                return 0;
+            }
+        }else{
             return 0;
+
         }
-    }
+    };
+
+    start_run = load_solver_map();
+
+
     if((std::strcmp(mode.c_str(), MODE_MAP ) == 0) && !wait_extern_pose ){
         solver.setOrigin(transform::Transform2d());
     }
@@ -2512,7 +2597,6 @@ int main(int argc, char **argv) {
     transform::Transform2d load_origin_tf;
 
     bool is_interactive_tf_change = false;
-    bool is_map_update = true;
 
     interactive_tf.setCallBack([&](auto &pose) {
 
@@ -2675,13 +2759,65 @@ int main(int argc, char **argv) {
 #endif
 
     common::Suspend suspend;
+    MissionManager missionManager;
+
+    missionManager.start_command_callback = [&]{
+        start_run = 1;
+        missionManager.respond(start_run);
+        start_run = load_solver_map();
+        missionManager.respond(start_run);
+    };
+    missionManager.stop_command_callback = [&]{
+        nh.setParam(amcl_tf_broadcast, true);
+        nh_private.setParam(status_param,0);
+    };
+
+    missionManager.start_run_callback = [&]{
+        nh_private.setParam(status_param,1);
+    };
+    missionManager.stop_run_callback = [&]{
+        nh_private.setParam(status_param,-1);
+    };
+
 
     while (ros::ok()) {
-        ros::spinOnce();
+
+        nh_private.getParam(run_param,run_command);
+
 #if 1
+        if(run_command == 0){
+            run_command_last = run_command;
+            nh.setParam(amcl_tf_broadcast, true);
+            suspend.sleep(1000.0);
+            continue;
+        }
+        if(run_command && !run_command_last){
+            run_command_last = run_command;
+
+            start_run = load_solver_map();
+        }
+
+        if(start_run == -1){
+            suspend.sleep(1000.0);
+            continue;
+        }
+
+#endif
+
+
+#if 0
+        missionManager.command(run_command);
+
+        if(missionManager.isCommandTrigger() == 0 || missionManager.isStartTrigger() == 0){
+            suspend.sleep(2000.0);
+            continue;
+        }
+
+#endif
+
+        ros::spinOnce();
         scan_task_manager.call();
         task_manager.call();
-#endif
 
         if (!tf_get_base_laser && scan_get_data) {
             try {
@@ -2738,7 +2874,7 @@ int main(int argc, char **argv) {
                 tl_.waitForTransform(odom_frame, base_frame, scan_time, ros::Duration(tf_wait_time));
 
                 tl_.lookupTransform(odom_frame, base_frame, scan_time, transform);
-                tf_get_odom_base = true;
+//                tf_get_odom_base = true;
                 tf_odom_base.set(transform.getOrigin().x(), transform.getOrigin().y(),
                                  tf::getYaw(transform.getRotation()));
                 get_odom_base_tf = true;
@@ -2817,18 +2953,21 @@ int main(int argc, char **argv) {
                                                            transform_tolerance_,
                                                            map_frame, odom_frame);
 
-                pub_map_odom_tf.stamp_ = ros::Time::now() + transform_tolerance_;
+                    pub_map_odom_tf.stamp_ = ros::Time::now() + transform_tolerance_;
 //                    PLOGD << "pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
                     tf_br.sendTransform(pub_map_odom_tf);
 
                     nh.setParam(amcl_tf_broadcast, false);
                     map_odom_tf_computed = true;
+                    nh_private.setParam(status_param,2);
 
 
 
 
                 }else{
                     nh.setParam(amcl_tf_broadcast, true);
+                    nh_private.setParam(status_param,-1);
+
 
                 }
 
@@ -2892,6 +3031,7 @@ int main(int argc, char **argv) {
 
     }
     nh.setParam(amcl_tf_broadcast, true);
+    nh_private.setParam(status_param,0);
 
     if(( (std::strcmp(mode.c_str(), MODE_MAP) ==0)  )|| ((std::strcmp(mode.c_str(), MODE_LOC) ==0) && dump_data && is_interactive_tf_change) ){
         std::string stamp = common::getCurrentDateTime("%Y-%m-%d-%H-%M-%S");

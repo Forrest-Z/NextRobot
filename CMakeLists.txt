@@ -274,7 +274,7 @@ target_include_directories(scan_filter_intensity PUBLIC ${CMAKE_CURRENT_SOURCE_D
 
 find_package (Eigen3 REQUIRED NO_MODULE)
 
-add_library(pcl_norm_2d src/icp/PCA2D.cpp src/icp/Normal2dEstimation.cpp)
+add_library(pcl_norm_2d STATIC src/icp/PCA2D.cpp src/icp/Normal2dEstimation.cpp)
 target_include_directories( pcl_norm_2d PUBLIC  ${EIGEN3_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include  ${CMAKE_SOURCE_DIR}/third_party/nlohmann  ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
 
 
@@ -285,8 +285,19 @@ add_executable(scan_matching src/scan_matching.cpp)
 target_include_directories(scan_matching PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
 
 target_link_libraries(scan_matching PUBLIC pcl_norm_2d ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
+if(scan_matching_debug)
+    set_asan(scan_matching)
+endif()
 
-set(shared_dirs ${mosquitto_ROOT}/lib )
+
+add_executable(scan_circle src/scan_circle.cpp)
+target_include_directories(scan_circle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+
+target_link_libraries(scan_circle PUBLIC pcl_norm_2d ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
+
+
+# ${Ceres_ROOT}/lib
+set(shared_dirs ${mosquitto_ROOT}/lib ${PCL_ROOT}/lib )
 foreach(dir ${shared_dirs})
     if(EXISTS "${dir}" AND IS_DIRECTORY "${dir}")
         message("EXISTS：${dir}")
@@ -303,7 +314,22 @@ install(TARGETS scan_republisher
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
         )
+install(TARGETS scan_matching
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+        )
+
+install(TARGETS scan_filter_intensity
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+        )
 
 install(DIRECTORY launch
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+        PATTERN "launch/data" EXCLUDE
         )
+
+set_target_runpath(scan_matching)
+include(CPack)

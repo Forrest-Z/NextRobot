@@ -165,23 +165,51 @@ namespace sensor{
 
                 bool valid = false;
                 int offset = 3;
+//                std::cout << "\n***********check range_valid_num\n";
                 for(int i = offset ; i < N-offset;i++){
                     ranges_valid_index[range_valid_num] = i;
+//                    std::cout << ranges_[i] << ", ";
                     valid = std::isnormal(ranges_[i])  &&(ranges_[i] < range_max) && (ranges_[i] > range_min)
                             && (  (std::abs(ranges_[i]-ranges_[i-1]) < scan_max_jump)|| (std::abs(ranges_[i]-ranges_[i+1]) < scan_max_jump) )
                             && ( std::abs( ranges_[i+1] - ranges_[i-1] ) < scan_max_jump)
-                            && ( std::atan2( offset*arc_inc * ranges_[i],std::abs(ranges_[i+1] - ranges_[i-1])    ) > scan_noise_angle                 )
+                            && ( std::atan2( offset*arc_inc * ranges_[i],std::abs(ranges_[i+1] - ranges_[i-1])    ) > scan_noise_angle )
                             ;
+
                     range_valid_num += valid;
 
                 }
+//                range_valid_num++;
 
-                for(int i = 0 ; i < range_valid_num;i++){
+//                std::cout << "\n***********check range_valid_num : " << range_valid_num << std::endl;
+
+#if 1
+                for(int i = 1 ; i < range_valid_num-1;i++){
                     int j = ranges_valid_index[i];
-                    local_xy_points[i+i] = ranges_[j]*cos_angle_buffer[j];
-                    local_xy_points[i+i +1] = ranges_[j]*sin_angle_buffer[j];
+                    float r = ranges_[j];
+                    float d1 = std::abs(ranges_[ranges_valid_index[i-1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i]-ranges_valid_index[i-1]);
+                    float d2 = std::abs(ranges_[ranges_valid_index[i+1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i+1] - ranges_valid_index[i]);
+                    float w = 0.5f/(ranges_valid_index[i+1]-ranges_valid_index[i-1]);
+
+                    r = (1.0 -w )*ranges_[ranges_valid_index[i]] + w*(d2*ranges_[ranges_valid_index[i-1]] + d1*ranges_[ranges_valid_index[i+1]]   )/(d1+d2);
+                     (ranges_[ranges_valid_index[i-1]] +ranges_[ranges_valid_index[i]]+ranges_[ranges_valid_index[i+1]] );
+                    local_xy_points[i+i-2] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i-1] = r*sin_angle_buffer[j];
 
                 }
+                range_valid_num -= 2;
+#endif
+#if 0
+                for(int i = 0 ; i < range_valid_num ;i++){
+                    int j = ranges_valid_index[i];
+                    float r = ranges_[j];
+                    local_xy_points[i+i] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i +1] = r*sin_angle_buffer[j];
+                }
+//                range_valid_num++;
+
+#endif
+
+
 
             }
 
@@ -228,7 +256,7 @@ namespace sensor{
 
             int N= markers.size();
 
-            std::cout << "start filter\n";
+            std::cout << "start filterMarker\n";
             std::cout << "N : " << N <<std::endl;
             std::cout << "ranges.size() : " << ranges.size() <<std::endl;
             std::cout << "ranges_filtered.size() : " << ranges_filtered.size() <<std::endl;
@@ -419,6 +447,7 @@ namespace sensor{
 
 
 
+            std::cout << "filterMarker Done\n";
 //            ranges_filtered = ranges;
         }
 

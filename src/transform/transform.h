@@ -97,10 +97,10 @@ namespace transform{
             int n_dim = points.size()/2;
 
             const float *p_data_x = &(points[0]);
-            const float *p_data_y = p_data_x + n_dim;
+//            const float *p_data_y = p_data_x + n_dim;
 
             float *p_x = &(result[0]);
-            float *p_y = p_x + n_dim;
+//            float *p_y = p_x + n_dim;
 //            std::cout << "tf, tx = " << tx << ", ty = " << ty << std::endl;
 
 //            std::cout << "tf, r00 = " << r00 << ", r01 = " << r01 << ", r10 = " << r10  << ", r11 = " << r11 << std::endl;
@@ -115,6 +115,90 @@ namespace transform{
             }
 
         }
+        void mul(const std::vector<float>& points, int n_dim, std::vector<float>& result){
+
+            /*
+         r00 r01 r02 tx     x0        x1
+         r10 r11 r12 ty  X  y0   =>   y1
+         r20 r21 r22 tz     z0        z1
+         0   0   0   1      1         1
+        */
+
+            if(points.size() < (n_dim+n_dim) ){
+                std::cerr << __FUNCTION__ << " ERROR : " << " points.size() = " << points.size() << std::endl;
+
+            }
+            result.resize(n_dim+n_dim);
+
+            float r00 = this->matrix[0][0];
+            float r01 = this->matrix[0][1];
+
+            float r10 = this->matrix[1][0];
+            float r11 = this->matrix[1][1];
+
+            float tx = this->matrix[0][2];
+            float ty = this->matrix[1][2];
+
+
+            const float *p_data_x = &(points[0]);
+//            const float *p_data_y = p_data_x + n_dim;
+
+            float *p_x = &(result[0]);
+//            float *p_y = p_x + n_dim;
+//            std::cout << "tf, tx = " << tx << ", ty = " << ty << std::endl;
+
+//            std::cout << "tf, r00 = " << r00 << ", r01 = " << r01 << ", r10 = " << r10  << ", r11 = " << r11 << std::endl;
+
+
+            for (int i = 0; i < n_dim; i++) {
+                p_x[i + i] = r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx;
+                p_x[i + i + 1] = r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty;
+//                std::cout << "== i = " << i << std::endl;
+//                std::cout << "== tf p_x = " << p_data_x[i+i] << ", p_y = " << p_data_x[i + i + 1] << std::endl;
+//                std::cout << "== tf d_x = " << r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx << ", d_y = " << r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty << std::endl;
+            }
+
+        }
+        void mul( float* points, int n_dim, float*  result){
+
+            /*
+         r00 r01 r02 tx     x0        x1
+         r10 r11 r12 ty  X  y0   =>   y1
+         r20 r21 r22 tz     z0        z1
+         0   0   0   1      1         1
+        */
+
+
+            float r00 = this->matrix[0][0];
+            float r01 = this->matrix[0][1];
+
+            float r10 = this->matrix[1][0];
+            float r11 = this->matrix[1][1];
+
+            float tx = this->matrix[0][2];
+            float ty = this->matrix[1][2];
+
+
+            const float *p_data_x = points;
+//            const float *p_data_y = p_data_x + n_dim;
+
+            float *p_x = result;
+//            float *p_y = p_x + n_dim;
+//            std::cout << "tf, tx = " << tx << ", ty = " << ty << std::endl;
+
+//            std::cout << "tf, r00 = " << r00 << ", r01 = " << r01 << ", r10 = " << r10  << ", r11 = " << r11 << std::endl;
+
+
+            for (int i = 0; i < n_dim; i++) {
+                p_x[i + i] = r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx;
+                p_x[i + i + 1] = r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty;
+//                std::cout << "== i = " << i << std::endl;
+//                std::cout << "== tf p_x = " << p_data_x[i+i] << ", p_y = " << p_data_x[i + i + 1] << std::endl;
+//                std::cout << "== tf d_x = " << r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx << ", d_y = " << r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty << std::endl;
+            }
+
+        }
+
         Transform2d operator*(const Transform2d& rhv )const{
             Transform2d transform;
             auto & mat  =this->matrix;
