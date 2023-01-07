@@ -33,6 +33,7 @@
 #include "common/task.h"
 #include "common/suspend.h"
 #include "sensor/laser_scan.h"
+#include "common/clock_time.h"
 
 #define OPTIM_ENABLE_EIGEN_WRAPPERS
 #include "optim.hpp"
@@ -46,6 +47,10 @@
 
 
  */
+
+#include "pid.h"
+
+
 
 struct Point{
     float x = 0.0;
@@ -239,7 +244,7 @@ void LaserScanSegment( std::vector<Point>& filter_points, std::vector<std::vecto
 //}
 
 // find circle
-void FindCircle(std::vector<Point>& points,float radius, float edge_radius, float edge_range_offset, float & center_x, float & center_y, float& error_mean){
+void FindCircle(std::vector<Point>& points,float radius, float edge_radius, float edge_range_offset, int min_point_num, float & center_x, float & center_y, float& error_mean){
 
     std::sort(points.begin(),points.end(), [](auto& v1, auto& v2){ return v1.r < v2.r; });
 
@@ -248,11 +253,13 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     PLOGD << "check angle_mean: " << angle_mean << std::endl;
 
     int valid_num = 0;
+    float min_r = points[0].r -0.02, max_r = points[0].r + edge_radius;
+
     for(auto&p : points){
         float center_angle = std::atan2(p.y,p.x );
 //        std::cout << "angle: " << center_angle <<", ";
 
-        if(p.r < points[0].r + edge_radius){
+        if( (p.r < max_r )&&(p.r > min_r) ){
             angle_sum += std::abs(center_angle - angle_mean) < M_PI ? center_angle : (center_angle + (center_angle - angle_mean) > 0.0 ? -M_PI*2: M_PI*2);
             valid_num++;
 
@@ -261,6 +268,14 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
 
         }
     }
+
+    if(valid_num < min_point_num){
+        PLOGD << "check valid_num fail return" << std::endl;
+
+        error_mean = 100.0;
+        return;
+    }
+
 
     angle_mean = angle_sum/float(valid_num);
     PLOGD << "valid_num: " << valid_num <<"angle_mean "  << angle_mean   << std::endl;
@@ -288,10 +303,19 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
 
         }
     }
+    PLOGD << "check egde_num: " << egde_num << std::endl;
+
+    if(egde_num < min_point_num){
+        PLOGD << "check egde_num fail return" << std::endl;
+
+        error_mean = 100.0;
+        return;
+    }
 
     edge_range /= float(egde_num);
 
     edge_range += radius;
+    PLOGD << "check edge_range: " << edge_range << std::endl;
 
 
     float cx = ux*(edge_range);
@@ -307,14 +331,14 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
 
 
     error_sum = 0.0;
-    std::cout << "check error:\n";
-    for(int i = 0 ; i <valid_num;i++){
+//    std::cout << "check error:\n";
+    for(int i = 0 ; i <points.size();i++){
         auto& p = points[i];
         float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-        std::cout << d << ", ";
+//        std::cout << d << ", ";
         error_sum += std::abs(d- radius) ;
     }
-    error_mean = error_sum/float(valid_num);
+    error_mean = error_sum/float(points.size());
     PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
 
     PLOGD << "check error_mean: " << error_mean << std::endl;
@@ -324,9 +348,26 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     Eigen::VectorXd x(2);
     x << cx, cy;
 
+    optim::algo_settings_t settings;
+//    settings.iter_max = 20;
+//    settings.bfgs_settings.wolfe_cons_1 = 1e-4;
+//    settings.bfgs_settings.wolfe_cons_2 = 0.8;
+
+//    settings.print_level = 1;
+
+    settings.vals_bound = true;
+
+    settings.lower_bounds = optim::ColVec_t::Zero(2);
+    settings.lower_bounds(0) = cx - 0.03;
+    settings.lower_bounds(1) = cy - 0.03;
+
+    settings.upper_bounds = optim::ColVec_t::Zero(2);
+    settings.upper_bounds(0) = cx + 0.03;
+    settings.upper_bounds(1) = cy + 0.03;
+
     CircleCostFunction opt_fn_obj(points,valid_num, radius) ;
 
-    bool success = optim::bfgs(x, opt_fn_obj, nullptr);
+    bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
 
     if (success) {
         std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
@@ -340,20 +381,21 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     cy = x(1);
 
     error_sum = 0.0;
-    for(int i = 0 ; i <valid_num;i++){
+    for(int i = 0 ; i <points.size();i++){
         auto& p = points[i];
         float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-        std::cout << d << ", ";
+//        std::cout << d << ", ";
         error_sum += std::abs(d- radius) ;
     }
+    error_mean = error_sum/float(points.size());
     PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
 
-    PLOGD << "check error: " << error_sum/float(valid_num) << std::endl;
-
-    return  ;
-
+    PLOGD << "check error_mean: " << error_mean << std::endl;
     center_x = cx;
     center_y = cy;
+    return  ;
+
+
 
 }
 
@@ -464,11 +506,16 @@ int main(int argc, char** argv){
     float circle_edge_radius = 0.08;
     int circle_min_num_in_radius = 10;
     float circle_edge_range_offset = 0.03;
+    int circle_min_point_num = 10;
 
     const char* circle_radius_param = "circle_radius";
     const char* circle_edge_radius_param = "circle_edge_radius";
     const char* circle_min_num_in_radius_param = "circle_min_num_in_radius";
     const char* circle_edge_range_offset_param = "circle_edge_range_offset";
+    const char* circle_min_point_num_param = "circle_min_point_num";
+
+    float max_fit_error = 0.01;
+    const char* max_fit_error_param = "max_fit_error";
 
     float split_dist_x = 0.08;
     float split_dist_y = 0.08;
@@ -482,13 +529,29 @@ int main(int argc, char** argv){
     const char* min_point_num_in_seg_param = "min_point_num_in_seg";
 
 
+    bool enable_control = false;
     float control_target_angle = 0.0;
     float control_target_distance = 0.5;
     const char* control_target_angle_param = "control_target_angle";
     const char* control_target_distance_param = "control_target_distance";
+    const char* enable_control_param = "enable_control";
 
 
+    float rotate_pid_control_kp = 0.1;
+    float rotate_pid_control_ki = 0.0;
+    float rotate_pid_control_kd = 0.0;
 
+    const char* rotate_pid_control_kp_param = "rotate_pid_control_kp";
+    const char* rotate_pid_control_ki_param = "rotate_pid_control_ki";
+    const char* rotate_pid_control_kd_param = "rotate_pid_control_kd";
+
+    float forward_pid_control_kp = 0.1;
+    float forward_pid_control_ki = 0.0;
+    float forward_pid_control_kd = 0.0;
+
+    const char* forward_pid_control_kp_param = "forward_pid_control_kp";
+    const char* forward_pid_control_ki_param = "forward_pid_control_ki";
+    const char* forward_pid_control_kd_param = "forward_pid_control_kd";
 
     // control command
     const char* status_param = "status";
@@ -496,6 +559,7 @@ int main(int argc, char** argv){
     int run_command = 0;
     int run_command_last = 0;
     int start_run = 0;
+    int control_finished_cnt = 0;
 
     //tf
     std::string base_frame = "base_link";
@@ -508,30 +572,48 @@ int main(int argc, char** argv){
     bool tf_get_base_laser = false;
 
 
+    auto load_params = [&]{
+        nh_private.getParam(mode_param, mode);
+        nh_private.getParam(max_fit_error_param, max_fit_error);
+        nh_private.getParam(sleep_time_param, sleep_time);
+        nh_private.getParam(tf_wait_time_param, tf_wait_time);
+        nh_private.getParam(range_max_param, range_max);
+        nh_private.getParam(range_min_param, range_min);
+        nh_private.getParam(scan_point_jump_param, scan_point_jump);
+        nh_private.getParam(scan_noise_angle_param, scan_noise_angle);
 
-    nh_private.getParam(mode_param, mode);
+        nh_private.getParam(box_filter_min_x_param, box_filter_min_x);
+        nh_private.getParam(box_filter_max_x_param, box_filter_max_x);
+        nh_private.getParam(box_filter_min_y_param, box_filter_min_y);
+        nh_private.getParam(box_filter_max_y_param, box_filter_max_y);
 
-    nh_private.getParam(sleep_time_param, sleep_time);
-    nh_private.getParam(tf_wait_time_param, tf_wait_time);
-    nh_private.getParam(range_max_param, range_max);
-    nh_private.getParam(range_min_param, range_min);
-    nh_private.getParam(scan_point_jump_param, scan_point_jump);
-    nh_private.getParam(scan_noise_angle_param, scan_noise_angle);
+        nh_private.getParam(circle_radius_param, circle_radius);
+        nh_private.getParam(circle_edge_radius_param, circle_edge_radius);
+        nh_private.getParam(circle_min_num_in_radius_param, circle_min_num_in_radius);
 
-    nh_private.getParam(box_filter_min_x_param, box_filter_min_x);
-    nh_private.getParam(box_filter_max_x_param, box_filter_max_x);
-    nh_private.getParam(box_filter_min_y_param, box_filter_min_y);
-    nh_private.getParam(box_filter_max_y_param, box_filter_max_y);
+        nh_private.getParam(circle_min_point_num_param, circle_min_point_num);
 
-    nh_private.getParam(circle_radius_param, circle_radius);
-    nh_private.getParam(circle_edge_radius_param, circle_edge_radius);
-    nh_private.getParam(circle_min_num_in_radius_param, circle_min_num_in_radius);
 
-    nh_private.getParam(split_dist_x_param, split_dist_x);
-    nh_private.getParam(split_dist_y_param, split_dist_y);
-    nh_private.getParam(split_dist_r_param, split_dist_r);
+        nh_private.getParam(split_dist_x_param, split_dist_x);
+        nh_private.getParam(split_dist_y_param, split_dist_y);
+        nh_private.getParam(split_dist_r_param, split_dist_r);
 
-    nh_private.getParam(min_point_num_in_seg_param, min_point_num_in_seg);
+        nh_private.getParam(min_point_num_in_seg_param, min_point_num_in_seg);
+
+        nh_private.getParam(control_target_angle_param, control_target_angle);
+        nh_private.getParam(control_target_distance_param, control_target_distance);
+        nh_private.getParam(enable_control_param, enable_control);
+
+        nh_private.getParam(rotate_pid_control_kp_param, rotate_pid_control_kp);
+        nh_private.getParam(rotate_pid_control_ki_param, rotate_pid_control_ki);
+        nh_private.getParam(rotate_pid_control_kd_param, rotate_pid_control_kd);
+        nh_private.getParam(forward_pid_control_kp_param, forward_pid_control_kp);
+        nh_private.getParam(forward_pid_control_ki_param, forward_pid_control_ki);
+        nh_private.getParam(forward_pid_control_kd_param, forward_pid_control_kd);
+    };
+
+    load_params();
+
 
 
     common::Suspend suspend;
@@ -595,6 +677,16 @@ int main(int argc, char** argv){
 
     int filter_point_num = 0;
 
+
+    PID rotate_pid(0.05, 0.1, -0.1, rotate_pid_control_kp, rotate_pid_control_kd, rotate_pid_control_ki);
+    common::Time rotate_pid_t1 = common::FromUnixNow();
+
+    PID forward_pid(0.05, 0.1, -0.1, forward_pid_control_kp, forward_pid_control_kd, forward_pid_control_ki);
+
+    float rotate_dt = 50.0;
+
+
+
     while (ros::ok()){
         nh_private.getParam(run_param,run_command);
 
@@ -607,9 +699,12 @@ int main(int argc, char** argv){
         if(run_command && !run_command_last){
             run_command_last = run_command;
 
+            start_run = 1;
+            control_finished_cnt = 0;
+
         }
 
-        if(start_run == -1){
+        if(start_run == -1 || start_run == 0){
             suspend.sleep(1000.0);
             continue;
         }
@@ -667,7 +762,7 @@ int main(int argc, char** argv){
 
             std::vector<DetectTarget> find_result(filter_points_segments.size());
             for(int i = 0 ; i <filter_points_segments.size(); i++ ){
-                FindCircle(filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
+                FindCircle(filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
                 tf_base_laser.mul(find_result[i].pose_in_laser, 1, find_result[i].pose_in_base);
 
             }
@@ -681,7 +776,7 @@ int main(int argc, char** argv){
             });
 
             int best_result_id = 0;
-            while(find_result[best_result_id].match_error > 0.02){
+            while(find_result[best_result_id].match_error > max_fit_error){
 
                 best_result_id++;
                 if(best_result_id == find_result.size()){
@@ -689,10 +784,13 @@ int main(int argc, char** argv){
                     break;
                 }
             }
+
             if(best_result_id == -1){
                 PLOGD << "find circle fail " << std::endl;
 
                 continue;
+            }else{
+
             }
             auto best_result = find_result[best_result_id];
 
@@ -711,22 +809,54 @@ int main(int argc, char** argv){
 
 
 
-            float angle_diff = std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0] );
+            float marker_angle = std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0] );
 
-            angle_diff -= control_target_angle;
+            float angle_diff = marker_angle - control_target_angle;
 
-            float distance_diff = std::sqrt(best_result.pose_in_base[0]*best_result.pose_in_base[0] + best_result.pose_in_base[1]*best_result.pose_in_base[1] );
+            float marker_distance = std::sqrt(best_result.pose_in_base[0]*best_result.pose_in_base[0] + best_result.pose_in_base[1]*best_result.pose_in_base[1] );
+            float distance_diff = marker_distance - control_target_distance;
+
+            PLOGD << "angle_diff: " << angle_diff << std::endl;
+            PLOGD << "distance_diff: " << distance_diff << std::endl;
+
+            if(!enable_control){
+                continue;
+            }
+
+            auto now = common::FromUnixNow();
+            rotate_dt = common::ToMillSeconds(now - rotate_pid_t1) * 0.001;
+            rotate_pid_t1 = now;
+            rotate_dt = (rotate_dt > 0.1) ? 0.1: rotate_dt;
 
 
-            distance_diff -= control_target_distance;
+            double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
+            PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
+
+            if(std::abs(rotate_pid_inc) < 0.01){
+                rotate_pid_inc = 0.0;
+            }
+            cmd_vel_msg.angular.z = rotate_pid_inc;
 
 
+//            if(std::abs(angle_diff) < 0.02)
+            {
+                float target_pose_x = distance_diff * std::cos(marker_angle);
+
+                target_pose_x = std::abs(target_pose_x) > 0.03 ? 0.03 * (target_pose_x>0.0 ? 1.0:-1.0 ):target_pose_x;
+
+                double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
+
+                PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
+                if(std::abs(forward_pid_inc) < 0.01){
+                    forward_pid_inc = 0.0;
+                }
+                cmd_vel_msg.linear.x = forward_pid_inc;
+
+            }
 
 
-
-            cmd_vel_msg.angular.z = (std::abs(angle_diff) > 0.01) ? 0.5*   (angle_diff>0.0 ? 0.1:-0.1): 0.0;
-
-
+#if 0
+            cmd_vel_msg.angular.z = (std::abs(angle_diff) > 0.01) ? 0.5* (angle_diff>0.0 ? 0.1:-0.1): 0.0;
             if(std::abs(distance_diff)<0.01 ||   (std::abs(angle_diff) > 0.02) ){
 
                 cmd_vel_msg.linear.x = 0.0;
@@ -751,12 +881,23 @@ int main(int argc, char** argv){
                     }
                 }
             }
-            PLOGD << "angle_diff: " << angle_diff << std::endl;
-            PLOGD << "distance_diff: " << distance_diff << std::endl;
+
+
+#endif
+
 
             PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
             PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
             cmd_vel_pub.publish(cmd_vel_msg);
+
+            if(std::abs(distance_diff)<0.01 && std::abs(angle_diff) < 0.01){
+                PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+
+                control_finished_cnt++;
+                if(control_finished_cnt > 10){
+                    start_run = 0;
+                }
+            }
 
 #if 0
             float tx = filter_points_laser[0].x + circle_radius;
