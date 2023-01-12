@@ -28,6 +28,9 @@
 #include "common/signal_handler.h"
 #include "../include/common/signal_handler.h"
 
+
+#include "sensor/laser_scan.h"
+
 template<typename T>
 bool getParam(const std::string &name, T &value) {
     if (name.empty()) {
@@ -363,7 +366,15 @@ int main(int argc, char **argv) {
     std::string fixed_frame_param = "fixed_frame";
 
     float range_max = 30.0;
-    std::string range_max_param = "range_max";
+    const char* range_max_param = "range_max";
+    float range_min = 1.0;
+    const char* range_min_param = "range_min";
+
+    float scan_point_jump = 0.06;
+    float scan_noise_angle = 0.06;
+    const char* scan_point_jump_param = "scan_point_jump";
+    const char* scan_noise_angle_param = "scan_noise_angle";
+
 
 
     getParam(map_name_param, map_name);
@@ -373,7 +384,10 @@ int main(int argc, char **argv) {
     getParam(mqtt_topic_qos_param, mqtt_topic_qos);
     getParam(fixed_frame_param, fixed_frame);
     getParam(range_max_param, range_max);
-
+    getParam(range_max_param, range_max);
+    getParam(range_min_param, range_min);
+    getParam(scan_point_jump_param, scan_point_jump);
+    getParam(scan_noise_angle_param, scan_noise_angle);
 
     std::string mqtt_topic = "agv/laser/ret/" + agv_sn;
     mqtt_client_id = mqtt_client_id + agv_sn;
@@ -453,14 +467,19 @@ int main(int argc, char **argv) {
     ROS_INFO("Waiting for tf transform.");
 
 
-    ScanToPoints scan_handler;
-    Transform2d transform2D;
+    sensor::ScanToPoints scan_handler;
+
+    scan_handler.scan_max_jump = scan_point_jump;
+    scan_handler.scan_noise_angle = scan_noise_angle;
+
+    transform::Transform2d tf_map_laser;
 
 
 
     auto cb = [&]( const sensor_msgs::LaserScanConstPtr &msg) {
 
-        scan_handler.getLocalPoints(msg,range_max);
+//        scan_handler.getLocalPoints(msg,range_max);
+        scan_handler.getLocalPoints(msg->ranges,msg->intensities,  msg->angle_min, msg->angle_increment, range_min, range_max);
 
 
         // get time
@@ -473,8 +492,27 @@ int main(int argc, char **argv) {
                 transform_.setRotation(transform.getRotation());
                 tf_transform_received = true;
                 ROS_INFO("Received tf transform.");
+//                std::cout << "debug " << __LINE__ << std::endl;
+
                 tf_transform_received = true;
-                scan_handler.getGlobalPoints(transform_.getOrigin().x(),transform_.getOrigin().y(),  tf::getYaw(transform_.getRotation()));
+//                scan_handler.getGlobalPoints(transform_.getOrigin().x(),transform_.getOrigin().y(),  tf::getYaw(transform_.getRotation()));
+                tf_map_laser.set(transform_.getOrigin().x(), transform_.getOrigin().y(),
+                                 tf::getYaw(transform_.getRotation()));
+                tf_map_laser.mul(&(scan_handler.local_xy_points[0]), scan_handler.range_valid_num, &(scan_handler.global_xy_points[0]));
+
+                scan_handler.global_xy_points_vec.resize( scan_handler.range_valid_num);
+//                std::cout << "debug " << __LINE__ << std::endl;
+//                std::cout << "scan_handler.range_valid_num " << scan_handler.range_valid_num  << std::endl;
+
+                for(int i = 0 ; i < scan_handler.range_valid_num;i++){
+                    scan_handler.global_xy_points_vec[i][0] =scan_handler.global_xy_points[i+i];
+                    scan_handler.global_xy_points_vec[i][1] =scan_handler.global_xy_points[i+i+1];
+                    scan_handler.global_xy_points_vec[i][2] =scan_handler.intensities_vec[i];
+
+                }
+//                std::cout << "debug " << __LINE__ << std::endl;
+
+
 
             }
             catch (tf::TransformException& ex) {

@@ -17,6 +17,7 @@ namespace sensor{
         std::vector<float> cos_angle_buffer;
         std::vector<float> sin_angle_buffer;
         std::vector<float> local_xy_points;
+        std::vector<float> intensities_vec;
         std::vector<float> global_xy_points;
         std::vector<std::array<float,3>> global_xy_points_vec;
         transform::Transform2d transform2D;
@@ -118,6 +119,107 @@ namespace sensor{
             }
 
         }
+
+        void getLocalPoints(  const  std::vector<float>& scan_ranges, const   std::vector<float>& scan_intensities, float angle_min, float  angle_increment, float range_min, float range_max){
+
+            int N = scan_ranges.size();
+
+//            ranges =  std::remove_const_t<std::vector<float>>(scan_ranges)  ;
+            auto & ranges_ =   scan_ranges  ;
+
+//            intensities = std::remove_const_t<std::vector<float>>(scan_intensities)  ;
+
+
+            if (!init_done){
+
+
+                FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                cos_angle_buffer.resize(N);
+                sin_angle_buffer.resize(N);
+                intensities_vec.resize(N);
+                local_xy_points.resize(N+N);
+                global_xy_points.resize(N+N);
+                global_xy_points_vec.resize(N,std::array<float,3>({0.0,0.0,0.0}));
+
+                for(int i = 0 ; i < N;i++){
+                    cos_angle_buffer[i] = cos(angle_buffer[i]);
+
+                }
+                for(int i = 0 ; i < N;i++){
+                    sin_angle_buffer[i] = sin(angle_buffer[i]);
+
+                }
+
+                scan_range_max = range_max;
+                scan_angle_inc_inv = 1.0/angle_increment;
+                arc_inc = sin(angle_increment);
+
+                ranges_filtered.resize(N,scan_range_max); //scan_range_max
+                ranges_valid_index.resize(N);
+                init_done = true;
+
+            }
+
+
+
+            {
+
+                range_valid_num = 0;
+
+                bool valid = false;
+                int offset = 3;
+//                std::cout << "\n***********check range_valid_num\n";
+                for(int i = offset ; i < N-offset;i++){
+                    ranges_valid_index[range_valid_num] = i;
+//                    std::cout << ranges_[i] << ", ";
+                    valid = std::isnormal(ranges_[i])  &&(ranges_[i] < range_max) && (ranges_[i] > range_min)
+                            && (  (std::abs(ranges_[i]-ranges_[i-1]) < scan_max_jump)|| (std::abs(ranges_[i]-ranges_[i+1]) < scan_max_jump) )
+                            && ( std::abs( ranges_[i+1] - ranges_[i-1] ) < scan_max_jump)
+                            && ( std::atan2( offset*arc_inc * ranges_[i],std::abs(ranges_[i+1] - ranges_[i-1])    ) > scan_noise_angle )
+                            ;
+
+                    range_valid_num += valid;
+
+                }
+//                range_valid_num++;
+
+//                std::cout << "\n***********check range_valid_num : " << range_valid_num << std::endl;
+
+#if 1
+                for(int i = 1 ; i < range_valid_num-1;i++){
+                    int j = ranges_valid_index[i];
+                    float r = ranges_[j];
+                    float d1 = std::abs(ranges_[ranges_valid_index[i-1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i]-ranges_valid_index[i-1]);
+                    float d2 = std::abs(ranges_[ranges_valid_index[i+1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i+1] - ranges_valid_index[i]);
+                    float w = 0.5f/(ranges_valid_index[i+1]-ranges_valid_index[i-1]);
+
+                    r = (1.0 -w )*ranges_[ranges_valid_index[i]] + w*(d2*ranges_[ranges_valid_index[i-1]] + d1*ranges_[ranges_valid_index[i+1]]   )/(d1+d2);
+                    (ranges_[ranges_valid_index[i-1]] +ranges_[ranges_valid_index[i]]+ranges_[ranges_valid_index[i+1]] );
+                    local_xy_points[i+i-2] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i-1] = r*sin_angle_buffer[j];
+                    intensities_vec[i-1] = scan_intensities[j];
+
+                }
+                range_valid_num -= 2;
+#endif
+#if 0
+                for(int i = 0 ; i < range_valid_num ;i++){
+                    int j = ranges_valid_index[i];
+                    float r = ranges_[j];
+                    local_xy_points[i+i] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i +1] = r*sin_angle_buffer[j];
+                }
+//                range_valid_num++;
+
+#endif
+
+
+
+            }
+
+        }
+
+        // filter ranges
         void getLocalPoints(  const  std::vector<float>& scan_ranges, float angle_min, float  angle_increment, float range_min, float range_max){
 
             int N = scan_ranges.size();
@@ -214,6 +316,107 @@ namespace sensor{
             }
 
         }
+        // filter ranges
+        // add box noise filter
+        void getLocalPoints(  const  std::vector<float>& scan_ranges, float angle_min, float  angle_increment, float range_min, float range_max,float filter_angle_min, float filter_angle_max){
+
+            int N = scan_ranges.size();
+
+//            ranges =  std::remove_const_t<std::vector<float>>(scan_ranges)  ;
+            auto & ranges_ =   scan_ranges  ;
+
+//            intensities = std::remove_const_t<std::vector<float>>(scan_intensities)  ;
+
+
+            if (!init_done){
+
+
+                FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                cos_angle_buffer.resize(N);
+                sin_angle_buffer.resize(N);
+                local_xy_points.resize(N+N);
+                global_xy_points.resize(N+N);
+                global_xy_points_vec.resize(N,std::array<float,3>({0.0,0.0,0.0}));
+
+                for(int i = 0 ; i < N;i++){
+                    cos_angle_buffer[i] = cos(angle_buffer[i]);
+
+                }
+                for(int i = 0 ; i < N;i++){
+                    sin_angle_buffer[i] = sin(angle_buffer[i]);
+
+                }
+
+                scan_range_max = range_max;
+                scan_angle_inc_inv = 1.0/angle_increment;
+                arc_inc = sin(angle_increment);
+
+                ranges_filtered.resize(N,scan_range_max); //scan_range_max
+                ranges_valid_index.resize(N);
+                init_done = true;
+
+            }
+
+
+
+            {
+
+                range_valid_num = 0;
+
+                bool valid = false;
+                int offset = 3;
+//                std::cout << "\n***********check range_valid_num\n";
+                for(int i = offset ; i < N-offset;i++){
+                    ranges_valid_index[range_valid_num] = i;
+//                    std::cout << ranges_[i] << ", ";
+                    valid = std::isnormal(ranges_[i])  &&(ranges_[i] < range_max) && (ranges_[i] > range_min)
+                            &&  (angle_buffer[i] > filter_angle_min) &&  (angle_buffer[i] < filter_angle_max)
+                            && (  (std::abs(ranges_[i]-ranges_[i-1]) < scan_max_jump)|| (std::abs(ranges_[i]-ranges_[i+1]) < scan_max_jump) )
+                            && ( std::abs( ranges_[i+1] - ranges_[i-1] ) < scan_max_jump)
+                            && ( std::atan2( offset*arc_inc * ranges_[i],std::abs(ranges_[i+1] - ranges_[i-1])    ) > scan_noise_angle )
+                             ;
+
+                    range_valid_num += valid;
+
+                }
+//                range_valid_num++;
+
+//                std::cout << "\n***********check range_valid_num : " << range_valid_num << std::endl;
+
+#if 1
+                for(int i = 1 ; i < range_valid_num-1;i++){
+                    int j = ranges_valid_index[i];
+                    float r = ranges_[j];
+                    float d1 = std::abs(ranges_[ranges_valid_index[i-1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i]-ranges_valid_index[i-1]);
+                    float d2 = std::abs(ranges_[ranges_valid_index[i+1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i+1] - ranges_valid_index[i]);
+                    float w = 0.5f/(ranges_valid_index[i+1]-ranges_valid_index[i-1]);
+
+                    r = (1.0 -w )*ranges_[ranges_valid_index[i]] + w*(d2*ranges_[ranges_valid_index[i-1]] + d1*ranges_[ranges_valid_index[i+1]]   )/(d1+d2);
+                    (ranges_[ranges_valid_index[i-1]] +ranges_[ranges_valid_index[i]]+ranges_[ranges_valid_index[i+1]] );
+                    local_xy_points[i+i-2] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i-1] = r*sin_angle_buffer[j];
+
+                }
+                range_valid_num -= 2;
+#endif
+#if 0
+                for(int i = 0 ; i < range_valid_num ;i++){
+                    int j = ranges_valid_index[i];
+                    float r = ranges_[j];
+                    local_xy_points[i+i] = r*cos_angle_buffer[j];
+                    local_xy_points[i+i +1] = r*sin_angle_buffer[j];
+                }
+//                range_valid_num++;
+
+#endif
+
+
+
+            }
+
+        }
+
+
         void getGlobalPoints(float x, float y, float yaw){
             transform2D.set(x,y,yaw);
             transform2D.mul(local_xy_points,global_xy_points);

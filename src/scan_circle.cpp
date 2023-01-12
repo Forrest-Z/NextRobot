@@ -13,7 +13,7 @@
 #include <visualization_msgs/InteractiveMarker.h>
 #include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
-
+#include <std_msgs/Float32MultiArray.h>
 
 #include <tf2_ros/transform_listener.h>
 #include <tf/transform_broadcaster.h>
@@ -32,8 +32,11 @@
 
 #include "common/task.h"
 #include "common/suspend.h"
-#include "sensor/laser_scan.h"
 #include "common/clock_time.h"
+
+#include "sensor/laser_scan.h"
+#include "sensor/geometry_types.h"
+#include "sensor/pointcloud_ros.h"
 
 #define OPTIM_ENABLE_EIGEN_WRAPPERS
 #include "optim.hpp"
@@ -51,16 +54,8 @@
 #include "pid.h"
 
 
-
-struct Point{
-    float x = 0.0;
-    float y = 0.0;
-    float z = 0.0;
-    float r = 0.0;
-};
-
 autodiff::var
-circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<Point>& points,int point_num, float radius_2)
+circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<geometry::Point>& points,int point_num, float radius_2)
 {
     autodiff::var r = 0.0;
     autodiff::var t = 0.0;
@@ -74,13 +69,13 @@ circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<Point>& points,in
 
 struct CircleCostFunction{
 
-    const std::vector<Point>& points;
+    const std::vector<geometry::Point>& points;
     int point_num;
     float radius = 0.1;
     float radius_2 = radius;
 
 
-    CircleCostFunction(const std::vector<Point>& t_points, int t_point_num, float t_radius):points(t_points),point_num(t_point_num), radius(t_radius),radius_2(radius*radius){
+    CircleCostFunction(const std::vector<geometry::Point>& t_points, int t_point_num, float t_radius):points(t_points),point_num(t_point_num), radius(t_radius),radius_2(radius*radius){
     }
 
 
@@ -108,7 +103,7 @@ struct CircleCostFunction{
  remove points outside of box
  */
 void LaserScanBoxFilter(const std::vector<float> &scan_points, int point_num,
-                        std::vector<Point>& filter_points, int& filter_point_num,
+                        std::vector<geometry::Point>& filter_points, int& filter_point_num,
                         float min_x, float max_x, float min_y, float max_y
                         ) {
 
@@ -128,7 +123,7 @@ void LaserScanBoxFilter(const std::vector<float> &scan_points, int point_num,
 }
 
 void LaserScanBoxFilter(const std::vector<float> &scan_points_laser, const std::vector<float> &scan_points_base, int point_num,
-                        std::vector<Point>& filter_points_laser, std::vector<Point>& filter_points_base, int& filter_point_num,
+                        std::vector<geometry::Point>& filter_points_laser, std::vector<geometry::Point>& filter_points_base, int& filter_point_num,
                         float min_x, float max_x, float min_y, float max_y
 ) {
 
@@ -156,18 +151,55 @@ void LaserScanBoxFilter(const std::vector<float> &scan_points_laser, const std::
 
 }
 
+void LaserScanRadiusFilter(const std::vector<float> &scan_points_laser, const std::vector<float> &scan_points_base, int point_num,
+                        std::vector<geometry::Point>& filter_points_laser, std::vector<geometry::Point>& filter_points_base, int& filter_point_num,
+                        float relative_x, float relative_y, float filter_radius
+) {
+
+    filter_point_num = 0;
+    bool valid = false;
+    filter_points_base.resize(point_num);
+    filter_points_laser.resize(point_num);
+
+    filter_radius *= filter_radius;
+
+    for (int i = 0; i < point_num; i++) {
+        valid = ((scan_points_base[i + i] - relative_x)*(scan_points_base[i + i] - relative_x) + ( scan_points_base[i + i + 1] - relative_y)*( scan_points_base[i + i + 1] - relative_y)) < filter_radius;
+
+        filter_points_base[filter_point_num].x = scan_points_base[i + i];
+        filter_points_base[filter_point_num].y = scan_points_base[i + i + 1];
+        filter_points_base[filter_point_num].r = std::sqrt(scan_points_base[i + i + 1]*scan_points_base[i + i + 1] + scan_points_base[i + i]*scan_points_base[i + i]);
+        filter_points_base[filter_point_num].b = std::atan2(scan_points_base[i + i + 1], scan_points_base[i + i]);
+        filter_points_laser[filter_point_num].x = scan_points_laser[i + i];
+        filter_points_laser[filter_point_num].y = scan_points_laser[i + i + 1];
+        filter_points_laser[filter_point_num].r = std::sqrt(scan_points_laser[i + i + 1]*scan_points_laser[i + i + 1] + scan_points_laser[i + i]*scan_points_laser[i + i]);
+        filter_points_laser[filter_point_num].b = std::atan2(scan_points_laser[i + i + 1], scan_points_laser[i + i]);
+
+
+        filter_point_num += valid;
+
+    }
+//    filter_point_num ++;
+
+
+}
+
+
 
 /*
  find
  */
-void LaserScanSegment( std::vector<Point>& filter_points, std::vector<std::vector<Point>>& segments, int filter_point_num, float split_dist_x,float split_dist_y,float split_dist_r, int min_point_in_seg_num
+void LaserScanSegment( const std::vector<geometry::Point>& filter_points, std::vector<std::vector<geometry::Point>>& segments, int filter_point_num, float split_dist_x,float split_dist_y,float split_dist_r, int min_point_in_seg_num
 ) {
 
 
-
-    // split to segments
     segments.clear();
-    std::vector<Point> segment;
+
+    if(filter_points.size() < min_point_in_seg_num){
+        return;
+    }
+    // split to segments
+    std::vector<geometry::Point> segment;
     bool process_done = false;
     PLOGD << "filter_point_num " << filter_point_num << std::endl;
 
@@ -215,7 +247,19 @@ void LaserScanSegment( std::vector<Point>& filter_points, std::vector<std::vecto
             break;
         }
     }
-#if 0
+
+    float meager_dist = split_dist_x*split_dist_x;
+    for(int i = 0 ; i < segments.size();i++){
+        for(int j = i+1 ; j < segments.size();j++){
+
+            if(segments[i].back().SquareDist(segments[j].front())<meager_dist || segments[j].back().SquareDist(segments[i].front())<meager_dist ){
+                segments[i].insert(segments[i].end(),segments[j].begin(), segments[j].end());
+                segments[j].clear();
+            }
+
+        }
+    }
+#if 1
 
     std::cout << "check segments:\n";
     for(auto &s : segments){
@@ -244,23 +288,31 @@ void LaserScanSegment( std::vector<Point>& filter_points, std::vector<std::vecto
 //}
 
 // find circle
-void FindCircle(std::vector<Point>& points,float radius, float edge_radius, float edge_range_offset, int min_point_num, float & center_x, float & center_y, float& error_mean){
+void FindCircle(std::vector<geometry::Point>& points,float radius, float edge_radius, float edge_range_offset, int min_point_num, float & center_x, float & center_y, float& error_mean){
 
+    if(points.size() < min_point_num){
+        PLOGD << "check points.size() fail return : " << points.size()  << std::endl;
+
+        error_mean = 100.0;
+        return;
+    }
     std::sort(points.begin(),points.end(), [](auto& v1, auto& v2){ return v1.r < v2.r; });
 
 
     float angle_mean = std::atan2(points[0].y,points[0].x ),angle_sum = 0.0;
-    PLOGD << "check angle_mean: " << angle_mean << std::endl;
+//    PLOGD << "check angle_mean: " << angle_mean << std::endl;
 
     int valid_num = 0;
     float min_r = points[0].r -0.02, max_r = points[0].r + edge_radius;
 
+//    std::cout << "compute center angle:\n";
+    float normalise_angle = 0.0;
     for(auto&p : points){
-        float center_angle = std::atan2(p.y,p.x );
-//        std::cout << "angle: " << center_angle <<", ";
+        normalise_angle = std::abs(p.b - angle_mean) < M_PI ? p.b : (p.b + ((p.b - angle_mean) > 0.0 ? -M_PI*2: M_PI*2) );
+//        std::cout << "angle: " << p.b <<", normalise_angle: " << normalise_angle << "\n";
 
         if( (p.r < max_r )&&(p.r > min_r) ){
-            angle_sum += std::abs(center_angle - angle_mean) < M_PI ? center_angle : (center_angle + (center_angle - angle_mean) > 0.0 ? -M_PI*2: M_PI*2);
+            angle_sum += normalise_angle;
             valid_num++;
 
         }else{
@@ -290,12 +342,10 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
     PLOGD << "angle_offset: " << angle_offset <<", angle_mean "  << angle_mean   << std::endl;
 
     for(auto&p : points){
-        float center_angle = std::atan2(p.y,p.x );
-//        PLOGD<< "angle: " << center_angle <<", x : " << p.x << ", y: " << p.y << "\n"  ;
+        normalise_angle = std::abs(p.b - angle_mean) < M_PI ? p.b : (p.b + ((p.b - angle_mean) > 0.0 ? -M_PI*2: M_PI*2) );
+//        std::cout << "angle: " << p.b <<", normalise_angle: " << normalise_angle << "\n";
 
-        center_angle = std::abs(center_angle - angle_mean) < M_PI ? center_angle : (center_angle + (center_angle - angle_mean) > 0.0 ? -M_PI*2: M_PI*2);
-
-        if(std::abs(center_angle - angle_mean)<angle_offset){
+        if(std::abs(normalise_angle - angle_mean)<angle_offset){
             edge_range += p.r;
             egde_num++;
         }else{
@@ -401,7 +451,7 @@ void FindCircle(std::vector<Point>& points,float radius, float edge_radius, floa
 
 
 struct DetectTarget{
-    // x,y,match_error
+    // x,y
     float pose_in_laser[2];
     float pose_in_base[2];
 
@@ -448,7 +498,21 @@ opt_fn(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
     return autodiff::val(y);
 }
 
+/*
 
+ todo:
+ 1. center/radius filter, update with odom change
+ 2.
+
+ */
+
+
+/*
+ detect target:
+ 1. one circle
+ 2. 4 legs of a shelf
+ 3. 2 legs of a shelf
+ */
 
 int main(int argc, char** argv){
 
@@ -470,20 +534,110 @@ int main(int argc, char** argv){
     std::string mode = "circle";
     const char* mode_param = "mode";
     const char* MODE_CIRCLE = "circle";
-    const char* MODE_SHELF = "shelf";
+    const char* MODE_SHELF4 = "shelf4";
+    const char* MODE_SHELF2 = "shelf2";
 
+
+    // target in base_frame
+    // x, y, yaw, init_radius, track_radius
+    std::vector<float> detect_target_relative_pose{0.0,0.0,0.0,0.0,0.0};
+    const char* detect_target_relative_pose_param = "detect_target_relative_pose";
+
+
+    transform::Transform2d detect_target_relative_tf;
+    transform::Transform2d detect_target_absolute_tf;
+    bool detect_target_absolute_pose_computed = false;
+
+
+    // odom_base_tf_1* detect_target_relative_tf_1 = odom_base_tf_2* detect_target_relative_tf_2
+    // detect_target_relative_tf_2 = odom_base_tf_2.inverse()*odom_base_tf_1* detect_target_relative_tf_1
+
+    transform::Transform2d odom_base_tf_1, odom_base_tf_2;
+
+
+    // shelf len_x, len_y
+    std::vector<float> shelf_len_y_x{0.0,0.0};
+    const char* shelf_len_y_x_param = "shelf_len_y_x";
+    /*
+     1. first detect shelf
+     maybe 4 legs or 2 legs
+     define shelf_center_pose_in_base, shelf_len_y, shelf_len_x, search_radius
+
+     2. detect
+     compute leg pose
+     filter and segment
+     match with shelf_len_y shelf_len_x
+
+     find center line, equally divide L1_L2 L3_L4
+
+
+     L1----------------------------L2
+
+
+                   <> target_origin
+
+
+     L3----------------------------L4
+
+
+                   ^ x
+                   |
+                   |
+          y<-------robot
+     * */
+
+    /*
+
+     3. final control pose
+
+     define
+     distance: robot to L1_L2_center
+     angle: angle between robot_x and shelf_origin_to_L1_L2_center
+
+
+     4. control
+     robot move to target pose without rotation
+     check tolerance
+     if not in tolerance, move back and move forward again
+     if in tolerance, rotate to target angle
+
+
+     L1-------------O---------------L2
+
+
+                   ^ x
+                   |
+                   |
+          y<-------robot
+
+
+
+     L3----------------------------L4
+
+     * */
+
+
+
+    std::vector<DetectTarget > shelf_leg_base_pose;
+//    std::vector<DetectTarget > shelf_leg_laser_pose;
 
 
     float sleep_time = 50.0;
     const char* sleep_time_param = "sleep_time";
 
     float tf_wait_time = 0.08;
-    const char* tf_wait_time_param = "sleep_time";
+    const char* tf_wait_time_param = "tf_wait_time";
 
     float range_max = 30.0;
     const char* range_max_param = "range_max";
     float range_min = 1.0;
     const char* range_min_param = "range_min";
+
+    float filer_angle_min = - 1.0;
+    float filer_angle_max = 1.0;
+    const char* filer_angle_min_param = "filer_angle_min";
+    const char* filer_angle_max_param = "filer_angle_max";
+
 
     float scan_point_jump = 0.06;
     float scan_noise_angle = 0.06;
@@ -536,22 +690,51 @@ int main(int argc, char** argv){
     const char* control_target_distance_param = "control_target_distance";
     const char* enable_control_param = "enable_control";
 
+    // if angle_diff is bigger than rotate_angle_up_bound
+    // robot should rotate to minimize angle_diff first
+    // then move forward
+    float rotate_angle_up_bound = 0.3;
+
+    float control_dist_tolerance = 0.01;
+    float control_angle_tolerance = 0.01;
+
+    float control_forward_vel_tolerance = 0.01;
+    float control_rotate_vel_tolerance = 0.01;
+
+    const char* control_dist_tolerance_param = "control_dist_tolerance";
+    const char* control_angle_tolerance_param = "control_angle_tolerance";
+    const char* control_forward_vel_tolerance_param = "control_forward_vel_tolerance";
+    const char* control_rotate_vel_tolerance_param = "control_rotate_vel_tolerance";
+
 
     float rotate_pid_control_kp = 0.1;
     float rotate_pid_control_ki = 0.0;
     float rotate_pid_control_kd = 0.0;
+    float rotate_pid_control_scale = 5.0;
 
     const char* rotate_pid_control_kp_param = "rotate_pid_control_kp";
     const char* rotate_pid_control_ki_param = "rotate_pid_control_ki";
     const char* rotate_pid_control_kd_param = "rotate_pid_control_kd";
+    const char* rotate_pid_control_scale_param = "rotate_pid_control_scale";
 
     float forward_pid_control_kp = 0.1;
     float forward_pid_control_ki = 0.0;
     float forward_pid_control_kd = 0.0;
+    float forward_pid_control_scale = 0.0;
 
     const char* forward_pid_control_kp_param = "forward_pid_control_kp";
     const char* forward_pid_control_ki_param = "forward_pid_control_ki";
     const char* forward_pid_control_kd_param = "forward_pid_control_kd";
+    const char* forward_pid_control_scale_param = "forward_pid_control_scale";
+
+
+    float final_control_dist = 0.05;
+    const char* final_control_dist_param = "final_control_dist";
+
+    float final_control_angle = 0.05;
+    const char* final_control_angle_param = "final_control_angle";
+
+
 
     // control command
     const char* status_param = "status";
@@ -568,12 +751,109 @@ int main(int argc, char** argv){
     std::string map_frame = "map";
     tf::TransformListener tl_;
     transform::Transform2d tf_base_laser;
+    transform::Transform2d tf_odom_base;
     tf::StampedTransform transform;
     bool tf_get_base_laser = false;
+    bool tf_get_odom_base = false;
 
+    // laser points
+
+    std::vector<geometry::Point> filter_points_laser(100);
+    std::vector<geometry::Point> filter_points_base(100);
+    std::vector<std::vector<geometry::Point>> circle_filter_points_segments;
+
+    std::vector<std::vector<std::vector<geometry::Point>>> shelf_filter_points_segments;
+
+
+    auto compute_leg_pose = [&]{
+
+        if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
+
+            float leg1[2] = {-0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
+            float leg2[2] = {-0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+            float leg3[2] = {0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
+            float leg4[2] = {0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+
+            shelf_leg_base_pose.resize(4);
+
+            detect_target_relative_tf.mul(leg1, 1, shelf_leg_base_pose[0].pose_in_base);
+            detect_target_relative_tf.mul(leg2, 1, shelf_leg_base_pose[1].pose_in_base);
+            detect_target_relative_tf.mul(leg3, 1, shelf_leg_base_pose[2].pose_in_base);
+            detect_target_relative_tf.mul(leg4, 1, shelf_leg_base_pose[3].pose_in_base);
+            shelf_filter_points_segments.resize(4);
+
+        }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
+            float leg1[2] = {0.0,0.5*shelf_len_y_x[0]};
+            float leg2[2] = {0.0,-0.5*shelf_len_y_x[0]};
+
+            shelf_leg_base_pose.resize(2);
+
+            detect_target_relative_tf.mul(leg1, 1, shelf_leg_base_pose[0].pose_in_base);
+            detect_target_relative_tf.mul(leg2, 1, shelf_leg_base_pose[1].pose_in_base);
+            shelf_filter_points_segments.resize(2);
+
+        }
+    };
 
     auto load_params = [&]{
         nh_private.getParam(mode_param, mode);
+
+        nh_private.getParam(detect_target_relative_pose_param, detect_target_relative_pose);
+
+        nh_private.getParam(shelf_len_y_x_param, shelf_len_y_x);
+
+        if(detect_target_relative_pose.size() != 5 ){
+            std::cerr << "detect_target_relative_pose size error"<< std::endl;
+            return -1;
+        }
+
+
+        std::cout << "load detect_target_relative_pose : " << detect_target_relative_pose[0] << ", " << detect_target_relative_pose[1] << ", " << detect_target_relative_pose[2] << ", " << detect_target_relative_pose[3] << std::endl;
+        if(std::abs(detect_target_relative_pose[0]) < 0.01){
+            std::cerr << "detect_target_relative_pose value error"<< std::endl;
+
+            return -1;
+        }
+        detect_target_relative_tf.set(detect_target_relative_pose[0],detect_target_relative_pose[1],detect_target_relative_pose[2]);
+
+
+
+        if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
+
+            if(shelf_len_y_x.size() != 2 ){
+                std::cerr << "shelf_len_y_x size error"<< std::endl;
+
+                return -1;
+            }
+
+            if(shelf_len_y_x[0] < 0.1 || shelf_len_y_x[1] < 0.1){
+                std::cerr << "shelf_len_y_x value error"<< std::endl;
+                return -1;
+            }
+
+            // compute four legs
+            compute_leg_pose();
+
+        }
+
+        if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
+
+            if(shelf_len_y_x.size() <= 1 ){
+                std::cerr << "shelf_len_y_x size error"<< std::endl;
+
+                return -1;
+            }
+
+            if(shelf_len_y_x[0] < 0.1 ){
+                std::cerr << "shelf_len_y_x value error"<< std::endl;
+                return -1;
+            }
+
+            // compute two legs
+            compute_leg_pose();
+        }
+
+
         nh_private.getParam(max_fit_error_param, max_fit_error);
         nh_private.getParam(sleep_time_param, sleep_time);
         nh_private.getParam(tf_wait_time_param, tf_wait_time);
@@ -581,6 +861,10 @@ int main(int argc, char** argv){
         nh_private.getParam(range_min_param, range_min);
         nh_private.getParam(scan_point_jump_param, scan_point_jump);
         nh_private.getParam(scan_noise_angle_param, scan_noise_angle);
+
+
+        nh_private.getParam(filer_angle_min_param, filer_angle_min);
+        nh_private.getParam(filer_angle_max_param, filer_angle_max);
 
         nh_private.getParam(box_filter_min_x_param, box_filter_min_x);
         nh_private.getParam(box_filter_max_x_param, box_filter_max_x);
@@ -590,6 +874,9 @@ int main(int argc, char** argv){
         nh_private.getParam(circle_radius_param, circle_radius);
         nh_private.getParam(circle_edge_radius_param, circle_edge_radius);
         nh_private.getParam(circle_min_num_in_radius_param, circle_min_num_in_radius);
+
+        nh_private.getParam(circle_edge_range_offset_param, circle_edge_range_offset);
+
 
         nh_private.getParam(circle_min_point_num_param, circle_min_point_num);
 
@@ -604,17 +891,31 @@ int main(int argc, char** argv){
         nh_private.getParam(control_target_distance_param, control_target_distance);
         nh_private.getParam(enable_control_param, enable_control);
 
+
+        nh_private.getParam(control_dist_tolerance_param, control_dist_tolerance);
+        nh_private.getParam(control_angle_tolerance_param, control_angle_tolerance);
+        nh_private.getParam(control_forward_vel_tolerance_param, control_forward_vel_tolerance);
+        nh_private.getParam(control_rotate_vel_tolerance_param,control_rotate_vel_tolerance);
+
+
+
+
         nh_private.getParam(rotate_pid_control_kp_param, rotate_pid_control_kp);
         nh_private.getParam(rotate_pid_control_ki_param, rotate_pid_control_ki);
         nh_private.getParam(rotate_pid_control_kd_param, rotate_pid_control_kd);
         nh_private.getParam(forward_pid_control_kp_param, forward_pid_control_kp);
         nh_private.getParam(forward_pid_control_ki_param, forward_pid_control_ki);
         nh_private.getParam(forward_pid_control_kd_param, forward_pid_control_kd);
+
+
+        nh_private.getParam(final_control_dist_param, final_control_dist);
+        nh_private.getParam(final_control_angle_param, final_control_angle);
+
+
+        return 1;
     };
 
-    load_params();
-
-
+    start_run = load_params();
 
     common::Suspend suspend;
     sensor::ScanToPoints scan_handler;
@@ -628,14 +929,17 @@ int main(int argc, char** argv){
         laser_frame.assign(msg->header.frame_id);
         scan_time = msg->header.stamp;
         scan_get_data = true;
-        scan_handler.getLocalPoints(msg->ranges, msg->angle_min, msg->angle_increment, range_min, range_max);
+        scan_handler.getLocalPoints(msg->ranges, msg->angle_min, msg->angle_increment, range_min, range_max,filer_angle_min,filer_angle_max);
         scan_get_data = scan_handler.range_valid_num > 10;
     };
     ros::Subscriber laser_sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, laser_cb);
 
 
+    nav_msgs::Odometry robot_odom;
+    bool odom_get_data = false;
     auto odom_cb = [&](const  nav_msgs::OdometryConstPtr &msg){
-
+        robot_odom = *msg;
+        odom_get_data = true;
     };
     ros::Subscriber odom_sub = nh.subscribe<nav_msgs::Odometry>("odom", 1, odom_cb);
 
@@ -643,12 +947,27 @@ int main(int argc, char** argv){
 
     const char* cmd_vel_topic = "/cmd_vel";
     const char* cloud_target_topic = "detect_target";
+    const char* target_viz_topic = "target_viz";
+    const char* cloud_filtered_topic = "cloud_filtered";
 
     ros::Publisher cmd_vel_pub =  nh.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
 
     geometry_msgs::Twist cmd_vel_msg;
 
     ros::Publisher cloud_target_pub = nh_private.advertise<visualization_msgs::MarkerArray>(cloud_target_topic,1);
+
+    ros::Publisher target_viz_pub = nh_private.advertise<geometry_msgs::Point>(target_viz_topic,1);
+    geometry_msgs::Point target_viz_msg ;
+
+    ros::Publisher cloud_filtered_pub = nh_private.advertise<sensor_msgs::PointCloud2>(cloud_filtered_topic, 1);
+    sensor_msgs::PointCloud2 cloud_filtered_msg;
+
+
+    cloud_filtered_msg.header.frame_id = "map";
+
+    sensor::createPointCloud2(cloud_filtered_msg, {"x", "y", "z"});
+
+    std::vector<geometry::Point> cloud_filtered_points;
 
 
     visualization_msgs::MarkerArray marker_array_msg;
@@ -668,9 +987,6 @@ int main(int argc, char** argv){
     marker_array_msg.markers.resize(1,marker_msg);
 
 
-    std::vector<Point> filter_points_laser(100);
-    std::vector<Point> filter_points_base(100);
-    std::vector<std::vector<Point>> filter_points_segments;
 
 
     std::vector<float> points_in_base(500);
@@ -678,38 +994,49 @@ int main(int argc, char** argv){
     int filter_point_num = 0;
 
 
-    PID rotate_pid(0.05, 0.1, -0.1, rotate_pid_control_kp, rotate_pid_control_kd, rotate_pid_control_ki);
+    float pid_dt = 0.001*sleep_time;
+
+
+    PID rotate_pid(pid_dt, 0.1, -0.1, rotate_pid_control_kp, rotate_pid_control_kd, rotate_pid_control_ki);
     common::Time rotate_pid_t1 = common::FromUnixNow();
 
-    PID forward_pid(0.05, 0.1, -0.1, forward_pid_control_kp, forward_pid_control_kd, forward_pid_control_ki);
-
-    float rotate_dt = 50.0;
+    PID forward_pid(pid_dt, 0.1, -0.1, forward_pid_control_kp, forward_pid_control_kd, forward_pid_control_ki);
 
 
+
+    bool first_detect_ok = false;
+
+    auto pending_task = [&]{
+        run_command_last = run_command;
+        suspend.sleep(1000.0);
+    };
+    auto restart_task = [&]{
+        run_command_last = run_command;
+        first_detect_ok = false;
+        detect_target_absolute_pose_computed = false;
+        start_run = load_params();
+        control_finished_cnt = 0;
+        rotate_pid.reset();
+        forward_pid.reset();
+
+    };
 
     while (ros::ok()){
         nh_private.getParam(run_param,run_command);
 
-#if 1
         if(run_command == 0){
-            run_command_last = run_command;
-            suspend.sleep(1000.0);
+            pending_task();
             continue;
         }
         if(run_command && !run_command_last){
-            run_command_last = run_command;
-
-            start_run = 1;
-            control_finished_cnt = 0;
-
+            restart_task();
         }
 
         if(start_run == -1 || start_run == 0){
-            suspend.sleep(1000.0);
+            pending_task();
             continue;
         }
 
-#endif
 
         ros::spinOnce();
 
@@ -732,6 +1059,22 @@ int main(int argc, char** argv){
                 }
             }
 
+
+            tf_get_odom_base = false;
+            // lookup odom base_link
+            try {
+                tl_.waitForTransform(odom_frame, base_frame, scan_time, ros::Duration(tf_wait_time));
+
+                tl_.lookupTransform(odom_frame, base_frame, scan_time, transform);
+//                tf_get_odom_base = true;
+                tf_odom_base.set(transform.getOrigin().x(), transform.getOrigin().y(),
+                                 tf::getYaw(transform.getRotation()));
+                tf_get_odom_base = true;
+
+            } catch (tf::TransformException &ex) {
+                ROS_ERROR("%s", ex.what());
+            }
+
             PLOGD << "tf_base_laser: " <<  tf_base_laser << std::endl;
 
             tf_base_laser.mul(scan_handler.local_xy_points, scan_handler.range_valid_num, points_in_base);
@@ -743,174 +1086,241 @@ int main(int argc, char** argv){
 
             }
 #endif
-            LaserScanBoxFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num,
-
-                               filter_points_laser,filter_points_base, filter_point_num,box_filter_min_x,box_filter_max_x,box_filter_min_y,box_filter_max_y );
 
 
+            cloud_filtered_points.clear();
 
-            PLOGD << "filter_point_num: " << filter_point_num << std::endl;
+            if(std::strcmp(mode.c_str(), MODE_CIRCLE) == 0){
+
+//                LaserScanBoxFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,box_filter_min_x,box_filter_max_x,box_filter_min_y,box_filter_max_y );
+
+                LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num, detect_target_relative_pose[0],detect_target_relative_pose[1],
+
+                                      detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+
+
+                PLOGD << "filter_point_num: " << filter_point_num << std::endl;
 #if 0
-            for(int i = 0; i < filter_point_num;i++){
+                for(int i = 0; i < filter_point_num;i++){
                 std::cout << "** "<< i << ", " << filter_points_laser[i].x << ", " << filter_points_laser[i].y  <<"\n";
 
             }
 #endif
 
-            LaserScanSegment(filter_points_laser,filter_points_segments, filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
+                LaserScanSegment(filter_points_laser,circle_filter_points_segments, filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
 
 
-            std::vector<DetectTarget> find_result(filter_points_segments.size());
-            for(int i = 0 ; i <filter_points_segments.size(); i++ ){
-                FindCircle(filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
-                tf_base_laser.mul(find_result[i].pose_in_laser, 1, find_result[i].pose_in_base);
+                std::vector<DetectTarget> find_result(circle_filter_points_segments.size());
+                for(int i = 0 ; i <circle_filter_points_segments.size(); i++ ){
+                    FindCircle(circle_filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
+                    tf_base_laser.mul(find_result[i].pose_in_laser, 1, find_result[i].pose_in_base);
 
-            }
-
-            if(find_result.empty()){
-                continue;
-            }
-
-            std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
-                return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
-            });
-
-            int best_result_id = 0;
-            while(find_result[best_result_id].match_error > max_fit_error){
-
-                best_result_id++;
-                if(best_result_id == find_result.size()){
-                    best_result_id = -1;
-                    break;
                 }
-            }
 
-            if(best_result_id == -1){
-                PLOGD << "find circle fail " << std::endl;
-
-                continue;
-            }else{
-
-            }
-            auto best_result = find_result[best_result_id];
-
-            PLOGD << "control_target_angle: " << control_target_angle << std::endl;
-            PLOGD << "control_target_distance: " << control_target_distance << std::endl;
-            PLOGD << "target pose in base ,  " << best_result.pose_in_base[0] << ", " << best_result.pose_in_base[1] << std::endl;
-
-
-            marker_array_msg.markers[0].header.stamp = scan_time;
-            marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
-            marker_array_msg.markers[0].pose.position.x =best_result.pose_in_laser[0];
-            marker_array_msg.markers[0].pose.position.y =best_result.pose_in_laser[1];
-            marker_array_msg.markers[0].id = 1;
-
-            cloud_target_pub.publish(marker_array_msg);
-
-
-
-            float marker_angle = std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0] );
-
-            float angle_diff = marker_angle - control_target_angle;
-
-            float marker_distance = std::sqrt(best_result.pose_in_base[0]*best_result.pose_in_base[0] + best_result.pose_in_base[1]*best_result.pose_in_base[1] );
-            float distance_diff = marker_distance - control_target_distance;
-
-            PLOGD << "angle_diff: " << angle_diff << std::endl;
-            PLOGD << "distance_diff: " << distance_diff << std::endl;
-
-            if(!enable_control){
-                continue;
-            }
-
-            auto now = common::FromUnixNow();
-            rotate_dt = common::ToMillSeconds(now - rotate_pid_t1) * 0.001;
-            rotate_pid_t1 = now;
-            rotate_dt = (rotate_dt > 0.1) ? 0.1: rotate_dt;
-
-
-            double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
-            PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
-
-            if(std::abs(rotate_pid_inc) < 0.01){
-                rotate_pid_inc = 0.0;
-            }
-            cmd_vel_msg.angular.z = rotate_pid_inc;
-
-
-//            if(std::abs(angle_diff) < 0.02)
-            {
-                float target_pose_x = distance_diff * std::cos(marker_angle);
-
-                target_pose_x = std::abs(target_pose_x) > 0.03 ? 0.03 * (target_pose_x>0.0 ? 1.0:-1.0 ):target_pose_x;
-
-                double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
-
-                PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
-                if(std::abs(forward_pid_inc) < 0.01){
-                    forward_pid_inc = 0.0;
+                if(find_result.empty()){
+                    continue;
                 }
-                cmd_vel_msg.linear.x = forward_pid_inc;
 
-            }
+                std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
+                    return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
+                });
 
+                int best_result_id = 0;
+                while(find_result[best_result_id].match_error > max_fit_error){
 
-#if 0
-            cmd_vel_msg.angular.z = (std::abs(angle_diff) > 0.01) ? 0.5* (angle_diff>0.0 ? 0.1:-0.1): 0.0;
-            if(std::abs(distance_diff)<0.01 ||   (std::abs(angle_diff) > 0.02) ){
+                    best_result_id++;
+                    if(best_result_id == find_result.size()){
+                        best_result_id = -1;
+                        break;
+                    }
+                }
 
-                cmd_vel_msg.linear.x = 0.0;
+                if(best_result_id == -1){
 
-            }else{
-                if(best_result.pose_in_base[0] > 0.0 ){
-
-                    if(distance_diff>0.0){
-                        cmd_vel_msg.linear.x = 0.1;
-
+                    if(!detect_target_absolute_pose_computed){
+                        PLOGD << "find circle fail " << std::endl;
+                        continue;
                     }else{
-                        cmd_vel_msg.linear.x = -0.1;
+                        if(tf_get_odom_base){
+
+
+                            detect_target_relative_tf = tf_odom_base.inverse()*detect_target_absolute_tf;
+
+                        }
 
                     }
                 }else{
-                    if(distance_diff>0.0){
-                        cmd_vel_msg.linear.x = -0.1;
+
+
+                    DetectTarget best_result = find_result[best_result_id];
+
+                    detect_target_relative_tf.set(best_result.pose_in_base[0] , best_result.pose_in_base[1], std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0]));
+                    if(tf_get_odom_base){
+
+                        detect_target_absolute_pose_computed = true;
+
+                        detect_target_absolute_tf = tf_odom_base * detect_target_relative_tf;
+
+                    }
+
+
+                }
+
+
+                first_detect_ok = true;
+
+                PLOGD << "control_target_angle: " << control_target_angle << std::endl;
+                PLOGD << "control_target_distance: " << control_target_distance << std::endl;
+                PLOGD << "target pose in base ,  " << detect_target_relative_tf.x() << ", " << detect_target_relative_tf.y() << std::endl;
+
+                detect_target_relative_pose[0] = detect_target_relative_tf.x();
+                detect_target_relative_pose[1] = detect_target_relative_tf.y();
+
+
+                marker_array_msg.markers[0].header.stamp = scan_time;
+//                marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
+                marker_array_msg.markers[0].pose.position.x =detect_target_relative_tf.x();
+                marker_array_msg.markers[0].pose.position.y =detect_target_relative_tf.y();
+                marker_array_msg.markers[0].id = 1;
+
+                cloud_target_pub.publish(marker_array_msg);
+
+
+
+                float marker_angle = detect_target_relative_tf.yaw();
+
+                marker_angle = std::abs(marker_angle - control_target_angle) < M_PI ? (marker_angle) : ( marker_angle + ((marker_angle- control_target_angle) > 0.0 ? -M_PI*2: M_PI*2) );
+
+                float angle_diff = marker_angle - control_target_angle;
+
+                float marker_distance = std::sqrt(detect_target_relative_tf.x()*detect_target_relative_tf.x() + detect_target_relative_tf.y()*detect_target_relative_tf.y() );
+                float distance_diff = marker_distance - control_target_distance;
+
+                PLOGD << "angle_diff: " << angle_diff << std::endl;
+                PLOGD << "distance_diff: " << distance_diff << std::endl;
+
+                {
+                    if( std::abs(angle_diff) > final_control_angle){
+                        cmd_vel_msg.angular.z =  final_control_angle*rotate_pid_control_kp*(angle_diff> 0.0 ? 1.0:-1.0);;
 
                     }else{
-                        cmd_vel_msg.linear.x = 0.1;
+                        double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
+                        PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
+
+                        if(std::abs(rotate_pid_inc) < control_rotate_vel_tolerance || std::abs(angle_diff) < control_angle_tolerance){
+                            rotate_pid_inc = 0.0;
+                        }
+                        cmd_vel_msg.angular.z =  rotate_pid_inc;
 
                     }
                 }
-            }
 
 
-#endif
 
 
-            PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
-            PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
-            cmd_vel_pub.publish(cmd_vel_msg);
 
-            if(std::abs(distance_diff)<0.01 && std::abs(angle_diff) < 0.01){
-                PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+                float target_pose_x = distance_diff * std::cos(marker_angle);
 
-                control_finished_cnt++;
-                if(control_finished_cnt > 10){
-                    start_run = 0;
+
+//            if(std::abs(angle_diff) < 0.02)
+                {
+
+                    if(std::abs(target_pose_x) > final_control_dist){
+                        cmd_vel_msg.linear.x =  final_control_dist*forward_pid_control_kp*(target_pose_x> 0.0 ? 1.0:-1.0);
+                    }else{
+                        double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
+
+                        PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
+                        if(std::abs(forward_pid_inc) < control_forward_vel_tolerance || std::abs(target_pose_x) < control_dist_tolerance){
+                            forward_pid_inc = 0.0;
+                        }
+                        cmd_vel_msg.linear.x =  forward_pid_inc;
+                    }
+
+                    target_viz_msg.x =target_pose_x;
+                    target_viz_msg.y =marker_angle;
+
+                    target_viz_pub.publish(target_viz_msg);
+
                 }
+
+
+                if(!enable_control){
+                    continue;
+                }
+
+                PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
+                PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
+                cmd_vel_pub.publish(cmd_vel_msg);
+
+                if(std::abs(target_pose_x)<control_dist_tolerance && std::abs(angle_diff) < control_angle_tolerance){
+                    PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+
+                    control_finished_cnt++;
+                    if(control_finished_cnt > 10){
+                        start_run = 0;
+                    }
+                }
+            }else if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
+
+                compute_leg_pose();
+                // filter and segment
+                // each leg has a clusters of points : std::vector<std::vector<Point>>
+
+                marker_array_msg.markers.resize(shelf_filter_points_segments.size(),marker_msg);
+
+                for(int i =0 ; i < shelf_filter_points_segments.size(); i++){
+
+
+                    PLOGD << "check leg: " << i << ", " << shelf_leg_base_pose[i].pose_in_base[0] << ", " << shelf_leg_base_pose[i].pose_in_base[1] << std::endl;
+
+                    LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,
+                                          shelf_leg_base_pose[i].pose_in_base[0],shelf_leg_base_pose[i].pose_in_base[1],
+
+                                          detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+
+                    LaserScanSegment(filter_points_laser,shelf_filter_points_segments[i], filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
+
+
+
+
+                    for(int j = 0 ; j < shelf_filter_points_segments[i].size();j++){
+
+                        cloud_filtered_points.insert(cloud_filtered_points.end(),shelf_filter_points_segments[i][j].begin(),shelf_filter_points_segments[i][j].end());
+
+                    }
+
+
+
+                    marker_array_msg.markers[i].header.stamp = scan_time;
+//                marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
+                    marker_array_msg.markers[i].pose.position.x = shelf_leg_base_pose[i].pose_in_base[0];
+                    marker_array_msg.markers[i].pose.position.y = shelf_leg_base_pose[i].pose_in_base[1];
+                    marker_array_msg.markers[i].id = i;
+
+                }
+
+                PLOGD << "create cloud_filtered_points size : " << cloud_filtered_points.size() << std::endl;
+
+
+                sensor::LaserScanToPointCloud2(cloud_filtered_points,cloud_filtered_points.size(),cloud_filtered_msg);
+                cloud_filtered_msg.header.stamp = scan_time;
+                cloud_filtered_msg.header.frame_id.assign(laser_frame);
+
+                cloud_filtered_pub.publish(cloud_filtered_msg);
+
+                cloud_target_pub.publish(marker_array_msg);
+
+
+            }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
+
+                compute_leg_pose();
+
             }
 
-#if 0
-            float tx = filter_points_laser[0].x + circle_radius;
-            float ty = filter_points_laser[0].y;
-            for(int i = 0; i < filter_point_num;i++){
-                float r = std::sqrt((filter_points_laser[i].x - tx)*(filter_points_laser[i].x - tx) + (ty  - filter_points_laser[i].y) *(ty - filter_points_laser[i].y) );
-                std::cout << filter_points_laser[i].x << ", " << filter_points_laser[i].y <<  ", " << filter_points_laser[i].r << ", "<< r << "\n";
 
-            }
-#endif
-            // find edge point
-            // radius filter
-            // compute target center
+
+
 
             scan_get_data = false;
 
