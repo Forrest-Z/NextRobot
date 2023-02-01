@@ -38,6 +38,9 @@
 #include "sensor/geometry_types.h"
 #include "sensor/pointcloud_ros.h"
 
+#include "perception/pointcloud_detection.h"
+
+
 #define OPTIM_ENABLE_EIGEN_WRAPPERS
 #include "optim.hpp"
 
@@ -165,7 +168,7 @@ void LaserScanRadiusFilter(const std::vector<float> &scan_points_laser, const st
 
     for (int i = 0; i < point_num; i++) {
         valid = ((scan_points_base[i + i] - relative_x)*(scan_points_base[i + i] - relative_x) + ( scan_points_base[i + i + 1] - relative_y)*( scan_points_base[i + i + 1] - relative_y)) < filter_radius;
-
+//        std::cout << "** " << scan_points_base[i + i] << ", " << scan_points_base[i + i + 1] << ", " << valid << "\n";
         filter_points_base[filter_point_num].x = scan_points_base[i + i];
         filter_points_base[filter_point_num].y = scan_points_base[i + i + 1];
         filter_points_base[filter_point_num].r = std::sqrt(scan_points_base[i + i + 1]*scan_points_base[i + i + 1] + scan_points_base[i + i]*scan_points_base[i + i]);
@@ -201,7 +204,7 @@ void LaserScanSegment( const std::vector<geometry::Point>& filter_points, std::v
     // split to segments
     std::vector<geometry::Point> segment;
     bool process_done = false;
-    PLOGD << "filter_point_num " << filter_point_num << std::endl;
+//    PLOGD << "filter_point_num " << filter_point_num << std::endl;
 
     for(int i = 1 ; i < filter_point_num; i++){
         bool split = std::abs(filter_points[i].x - filter_points[i -1].x) > split_dist_x
@@ -226,14 +229,18 @@ void LaserScanSegment( const std::vector<geometry::Point>& filter_points, std::v
 
                 if(split|| (j == filter_point_num-1)){
 //                    std::cout << "====== split,  l = " << l << ", j = " << j << ", filter_point_num = " << filter_point_num <<"\n ";
-
+#if 0
                     if((j == filter_point_num-1)){
                         segment.emplace_back(filter_points[l]);
                     }
+#endif
                     if(segment.size() > min_point_in_seg_num){
                         segments.emplace_back(std::move(segment));
-                        segment.clear();
                     }
+
+                    segment.clear();
+
+
                 }
 
                 segment.emplace_back(filter_points[l]);
@@ -247,6 +254,9 @@ void LaserScanSegment( const std::vector<geometry::Point>& filter_points, std::v
             break;
         }
     }
+
+
+    PLOGD << "init segments.size() " << segments.size() << std::endl;
 
     float meager_dist = split_dist_x*split_dist_x;
     for(int i = 0 ; i < segments.size();i++){
@@ -450,13 +460,7 @@ void FindCircle(std::vector<geometry::Point>& points,float radius, float edge_ra
 }
 
 
-struct DetectTarget{
-    // x,y
-    float pose_in_laser[2];
-    float pose_in_base[2];
 
-    float match_error;
-};
 
 #if 0
 // The multi-variable function for which derivatives are needed
@@ -497,6 +501,11 @@ opt_fn(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
 
     return autodiff::val(y);
 }
+
+
+
+void FindShelfLeg(){}
+
 
 /*
 
@@ -548,6 +557,7 @@ int main(int argc, char** argv){
     transform::Transform2d detect_target_absolute_tf;
     bool detect_target_absolute_pose_computed = false;
 
+    std::array<float,4> shelf_empty_region{0.0,0.0,0.0,0.0};
 
     // odom_base_tf_1* detect_target_relative_tf_1 = odom_base_tf_2* detect_target_relative_tf_2
     // detect_target_relative_tf_2 = odom_base_tf_2.inverse()*odom_base_tf_1* detect_target_relative_tf_1
@@ -566,6 +576,9 @@ int main(int argc, char** argv){
      2. detect
      compute leg pose
      filter and segment
+     find empty region doesn't contain points: shelf center, line center
+     or big box cover robot ase and leg center
+
      match with shelf_len_y shelf_len_x
 
      find center line, equally divide L1_L2 L3_L4
@@ -617,9 +630,23 @@ int main(int argc, char** argv){
      * */
 
 
+    float front_radius = 0.03;
+    const char* front_radius_param = "front_radius";
+    int front_min_num = 5;
+    const char* front_min_num_param = "front_min_num";
 
-    std::vector<DetectTarget > shelf_leg_base_pose;
-//    std::vector<DetectTarget > shelf_leg_laser_pose;
+
+
+    std::vector<geometry::DetectTarget > shelf_leg_base_pose;
+    std::vector<std::vector<geometry::DetectTarget>> shelf_leg_front_pose;
+    std::vector<int> shelf_leg_important_index{0,1,2,3};
+    std::vector< std::array<int,10>> shelf_leg_match_result;
+    float pattern_match_radius = 0.05;
+    int shelf_leg_min_matched_num = 4;
+    float shelf_max_fit_error = 0.04;
+
+
+//    std::vector<geometry::DetectTarget > shelf_leg_laser_pose;
 
 
     float sleep_time = 50.0;
@@ -633,8 +660,8 @@ int main(int argc, char** argv){
     float range_min = 1.0;
     const char* range_min_param = "range_min";
 
-    float filer_angle_min = - 1.0;
-    float filer_angle_max = 1.0;
+    float filer_angle_min = - 1.57;
+    float filer_angle_max = 1.57;
     const char* filer_angle_min_param = "filer_angle_min";
     const char* filer_angle_max_param = "filer_angle_max";
 
@@ -751,6 +778,8 @@ int main(int argc, char** argv){
     std::string map_frame = "map";
     tf::TransformListener tl_;
     transform::Transform2d tf_base_laser;
+    transform::Transform2d tf_base_laser_inv;
+
     transform::Transform2d tf_odom_base;
     tf::StampedTransform transform;
     bool tf_get_base_laser = false;
@@ -761,7 +790,6 @@ int main(int argc, char** argv){
     std::vector<geometry::Point> filter_points_laser(100);
     std::vector<geometry::Point> filter_points_base(100);
     std::vector<std::vector<geometry::Point>> circle_filter_points_segments;
-
     std::vector<std::vector<std::vector<geometry::Point>>> shelf_filter_points_segments;
 
 
@@ -769,10 +797,10 @@ int main(int argc, char** argv){
 
         if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
 
-            float leg1[2] = {-0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
-            float leg2[2] = {-0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
-            float leg3[2] = {0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
-            float leg4[2] = {0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+            float leg1[2] = {0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
+            float leg2[2] = {0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+            float leg3[2] = {-0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
+            float leg4[2] = {-0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
 
             shelf_leg_base_pose.resize(4);
 
@@ -780,8 +808,11 @@ int main(int argc, char** argv){
             detect_target_relative_tf.mul(leg2, 1, shelf_leg_base_pose[1].pose_in_base);
             detect_target_relative_tf.mul(leg3, 1, shelf_leg_base_pose[2].pose_in_base);
             detect_target_relative_tf.mul(leg4, 1, shelf_leg_base_pose[3].pose_in_base);
-            shelf_filter_points_segments.resize(4);
 
+//            shelf_empty_region
+            shelf_filter_points_segments.resize(4);
+            shelf_leg_front_pose.resize(4);
+            shelf_leg_min_matched_num = 3;
         }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
             float leg1[2] = {0.0,0.5*shelf_len_y_x[0]};
             float leg2[2] = {0.0,-0.5*shelf_len_y_x[0]};
@@ -791,7 +822,8 @@ int main(int argc, char** argv){
             detect_target_relative_tf.mul(leg1, 1, shelf_leg_base_pose[0].pose_in_base);
             detect_target_relative_tf.mul(leg2, 1, shelf_leg_base_pose[1].pose_in_base);
             shelf_filter_points_segments.resize(2);
-
+            shelf_leg_front_pose.resize(2);
+            shelf_leg_min_matched_num= 2;
         }
     };
 
@@ -852,6 +884,12 @@ int main(int argc, char** argv){
             // compute two legs
             compute_leg_pose();
         }
+
+
+
+        nh_private.getParam(front_radius_param, front_radius);
+
+        nh_private.getParam(front_min_num_param, front_min_num);
 
 
         nh_private.getParam(max_fit_error_param, max_fit_error);
@@ -947,8 +985,9 @@ int main(int argc, char** argv){
 
     const char* cmd_vel_topic = "/cmd_vel";
     const char* cloud_target_topic = "detect_target";
-    const char* target_viz_topic = "target_viz";
+    const char* debug_info_topic = "debug_info";
     const char* cloud_filtered_topic = "cloud_filtered";
+    const char* detect_results_topic = "detect_results";
 
     ros::Publisher cmd_vel_pub =  nh.advertise<geometry_msgs::Twist>(cmd_vel_topic, 1);
 
@@ -956,12 +995,18 @@ int main(int argc, char** argv){
 
     ros::Publisher cloud_target_pub = nh_private.advertise<visualization_msgs::MarkerArray>(cloud_target_topic,1);
 
-    ros::Publisher target_viz_pub = nh_private.advertise<geometry_msgs::Point>(target_viz_topic,1);
-    geometry_msgs::Point target_viz_msg ;
+    ros::Publisher debug_info_pub = nh_private.advertise<geometry_msgs::Point>(debug_info_topic,1);
+    geometry_msgs::Point debug_info_msg ;
 
     ros::Publisher cloud_filtered_pub = nh_private.advertise<sensor_msgs::PointCloud2>(cloud_filtered_topic, 1);
     sensor_msgs::PointCloud2 cloud_filtered_msg;
 
+    ros::Publisher detect_results_pub = nh_private.advertise<geometry_msgs::PoseArray>(detect_results_topic, 1);
+    geometry_msgs::PoseArray detect_results_msg;
+    geometry_msgs::Pose target_pose;
+
+
+    detect_results_msg.header.frame_id = "base_link";
 
     cloud_filtered_msg.header.frame_id = "map";
 
@@ -1053,6 +1098,7 @@ int main(int argc, char** argv){
                     tf_base_laser.set(transform.getOrigin().x(), transform.getOrigin().y(),
                                       tf::getYaw(transform.getRotation()));
 
+                    tf_base_laser_inv = tf_base_laser.inverse();
                 } catch (tf::TransformException &ex) {
                     ROS_ERROR("%s", ex.what());
                     continue;
@@ -1110,7 +1156,7 @@ int main(int argc, char** argv){
                 LaserScanSegment(filter_points_laser,circle_filter_points_segments, filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
 
 
-                std::vector<DetectTarget> find_result(circle_filter_points_segments.size());
+                std::vector<geometry::DetectTarget> find_result(circle_filter_points_segments.size());
                 for(int i = 0 ; i <circle_filter_points_segments.size(); i++ ){
                     FindCircle(circle_filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
                     tf_base_laser.mul(find_result[i].pose_in_laser, 1, find_result[i].pose_in_base);
@@ -1152,7 +1198,7 @@ int main(int argc, char** argv){
                 }else{
 
 
-                    DetectTarget best_result = find_result[best_result_id];
+                    geometry::DetectTarget best_result = find_result[best_result_id];
 
                     detect_target_relative_tf.set(best_result.pose_in_base[0] , best_result.pose_in_base[1], std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0]));
                     if(tf_get_odom_base){
@@ -1237,10 +1283,10 @@ int main(int argc, char** argv){
                         cmd_vel_msg.linear.x =  forward_pid_inc;
                     }
 
-                    target_viz_msg.x =target_pose_x;
-                    target_viz_msg.y =marker_angle;
+                    debug_info_msg.x =target_pose_x;
+                    debug_info_msg.y =marker_angle;
 
-                    target_viz_pub.publish(target_viz_msg);
+                    debug_info_pub.publish(debug_info_msg);
 
                 }
 
@@ -1263,44 +1309,153 @@ int main(int argc, char** argv){
                 }
             }else if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
 
-                compute_leg_pose();
+//                compute_leg_pose();
                 // filter and segment
                 // each leg has a clusters of points : std::vector<std::vector<Point>>
 
-                marker_array_msg.markers.resize(shelf_filter_points_segments.size(),marker_msg);
+                marker_array_msg.markers.resize(shelf_leg_base_pose.size(),marker_msg);
+                shelf_leg_front_pose.resize(shelf_leg_base_pose.size());
 
-                for(int i =0 ; i < shelf_filter_points_segments.size(); i++){
+                detect_results_msg.poses.clear();
+                shelf_filter_points_segments.resize(shelf_leg_base_pose.size());
+
+                for(int i =0 ; i < shelf_leg_base_pose.size(); i++){
 
 
                     PLOGD << "check leg: " << i << ", " << shelf_leg_base_pose[i].pose_in_base[0] << ", " << shelf_leg_base_pose[i].pose_in_base[1] << std::endl;
+
+                    tf_base_laser_inv.mul(shelf_leg_base_pose[i].pose_in_base, 1, shelf_leg_base_pose[i].pose_in_laser);
+
 
                     LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,
                                           shelf_leg_base_pose[i].pose_in_base[0],shelf_leg_base_pose[i].pose_in_base[1],
 
                                           detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+                    PLOGD << "check filter_points_laser size : " << filter_points_laser.size() << std::endl;
+                    PLOGD << "check filter_point_num : " << filter_point_num << std::endl;
 
                     LaserScanSegment(filter_points_laser,shelf_filter_points_segments[i], filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
 
 
 
-
+                    shelf_leg_front_pose[i].resize(shelf_filter_points_segments[i].size());
                     for(int j = 0 ; j < shelf_filter_points_segments[i].size();j++){
+
+                        perception::FindFrontEdge(shelf_filter_points_segments[i][j],front_min_num, front_radius ,shelf_leg_front_pose[i][j].pose_in_laser[0], shelf_leg_front_pose[i][j].pose_in_laser[1],shelf_leg_front_pose[i][j].match_error );
+
+                        if(shelf_leg_front_pose[i][j].match_error < 0.05){
+                            tf_base_laser.mul(shelf_leg_front_pose[i][j].pose_in_laser, 1, shelf_leg_front_pose[i][j].pose_in_base);
+
+                            PLOGD << "check FindFrontEdge pose_in_laser: " << shelf_leg_front_pose[i][j].pose_in_laser[0] << ", " << shelf_leg_front_pose[i][j].pose_in_laser[1]  << std::endl;
+                            PLOGD << "check FindFrontEdge pose_in_base : " << shelf_leg_front_pose[i][j].pose_in_base[0] << ", " << shelf_leg_front_pose[i][j].pose_in_base[1]  << std::endl;
+                            target_pose.position.x = shelf_leg_front_pose[i][j].pose_in_laser[0];
+                            target_pose.position.y = shelf_leg_front_pose[i][j].pose_in_laser[1];
+
+                            math::yaw_to_quaternion(std::atan2(shelf_leg_front_pose[i][j].pose_in_laser[1],shelf_leg_front_pose[i][j].pose_in_laser[0]),
+                                                    target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
+
+                            detect_results_msg.poses.emplace_back(target_pose);
+
+                        }
 
                         cloud_filtered_points.insert(cloud_filtered_points.end(),shelf_filter_points_segments[i][j].begin(),shelf_filter_points_segments[i][j].end());
 
                     }
 
 
+//                    perception::FindMatchPattern()
 
                     marker_array_msg.markers[i].header.stamp = scan_time;
-//                marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
+//                    marker_array_msg.markers[i].scale.x = 2.0*(detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+//                    marker_array_msg.markers[i].scale.y = marker_array_msg.markers[i].scale.x;
+
+//                    marker_array_msg.markers[i].header.frame_id.assign(laser_frame);
                     marker_array_msg.markers[i].pose.position.x = shelf_leg_base_pose[i].pose_in_base[0];
                     marker_array_msg.markers[i].pose.position.y = shelf_leg_base_pose[i].pose_in_base[1];
                     marker_array_msg.markers[i].id = i;
 
                 }
 
-                PLOGD << "create cloud_filtered_points size : " << cloud_filtered_points.size() << std::endl;
+
+
+                /*
+                 1. cluster segment result save in  shelf_filter_points_segments
+                 shelf_filter_points_segments : [ L1:[c1:[p1,p2,p3],c2,c3] ,L2:[c1,c2,c3],L3:[],L4:[]  ]
+
+
+                 2. for each cluster
+                 compute front end pose in laser frame
+                 check L1 L2 with leg distance
+                 only at first time, check L3 L4 with leg distance, if L3 L4 exist
+
+                 compute L1 L2 direction center
+
+                 */
+
+
+                perception::FindMatchPattern(shelf_leg_base_pose,shelf_leg_front_pose,pattern_match_radius, shelf_leg_min_matched_num,shelf_leg_match_result );
+
+                std::sort(shelf_leg_match_result.begin(),shelf_leg_match_result.end(), [](auto& v1, auto& v2){
+
+                    return v1.back() < v2.back();
+                });
+
+                PLOGD << "shelf_leg_match_result size " << shelf_leg_match_result.size() << std::endl;
+                if(shelf_leg_match_result.empty()){
+                    detect_results_msg.header.stamp = scan_time;
+                    detect_results_msg.header.frame_id.assign(laser_frame);
+
+                    detect_results_pub.publish(detect_results_msg);
+                    continue;
+                }
+
+                auto& best_result = shelf_leg_match_result.front();
+
+                PLOGD << "shelf_leg_match_result best_result.back() " << best_result.back()  << std::endl;
+
+                if( ( best_result.back() > shelf_max_fit_error*1000.0) || (best_result[0] == -1) || (best_result[1] == -1) ){
+                    detect_results_msg.header.stamp = scan_time;
+                    detect_results_msg.header.frame_id.assign(laser_frame);
+
+                    detect_results_pub.publish(detect_results_msg);
+
+                    continue;
+
+                }
+
+
+                // check matched legs
+                auto& detect_leg1 = shelf_leg_front_pose[0][best_result[0]];
+                auto& detect_leg2 = shelf_leg_front_pose[1][best_result[1]];
+
+                PLOGD << "check two leg" << std::endl;
+                PLOGD << shelf_leg_base_pose[0].pose_in_base[0] << ", " << shelf_leg_base_pose[0].pose_in_base[1] << ", " << shelf_leg_base_pose[0].pose_in_laser[0] << ", " << shelf_leg_base_pose[0].pose_in_laser[1] << std::endl;
+                PLOGD << shelf_leg_base_pose[1].pose_in_base[0] << ", " << shelf_leg_base_pose[1].pose_in_base[1] << ", " << shelf_leg_base_pose[1].pose_in_laser[0] << ", " << shelf_leg_base_pose[1].pose_in_laser[1] << std::endl;
+
+                PLOGD << detect_leg1.pose_in_base[0] << ", " << detect_leg1.pose_in_base[1] << ", " << detect_leg1.pose_in_laser[0] << ", " << detect_leg1.pose_in_laser[1] << std::endl;
+                PLOGD << detect_leg2.pose_in_base[0] << ", " << detect_leg2.pose_in_base[1] << ", " << detect_leg2.pose_in_laser[0] << ", " << detect_leg2.pose_in_laser[1] << std::endl;
+
+                first_detect_ok = true;
+                shelf_leg_min_matched_num = 2;
+
+
+
+                shelf_leg_base_pose[0] = detect_leg1;
+                shelf_leg_base_pose[1] = detect_leg2;
+                shelf_leg_base_pose.resize(2);
+
+
+
+                target_pose.position.x = 0.5*(detect_leg1.pose_in_laser[0] + detect_leg2.pose_in_laser[0]);
+                target_pose.position.y = 0.5*(detect_leg1.pose_in_laser[1] + detect_leg2.pose_in_laser[1]);
+
+                math::yaw_to_quaternion(std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + 0.5*M_PI,
+                                        target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
+
+                detect_results_msg.poses.emplace_back(target_pose);
+
+
+
 
 
                 sensor::LaserScanToPointCloud2(cloud_filtered_points,cloud_filtered_points.size(),cloud_filtered_msg);
@@ -1310,11 +1465,15 @@ int main(int argc, char** argv){
                 cloud_filtered_pub.publish(cloud_filtered_msg);
 
                 cloud_target_pub.publish(marker_array_msg);
+                detect_results_msg.header.stamp = scan_time;
+                detect_results_msg.header.frame_id.assign(laser_frame);
+
+                detect_results_pub.publish(detect_results_msg);
 
 
             }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
 
-                compute_leg_pose();
+//                compute_leg_pose();
 
             }
 
