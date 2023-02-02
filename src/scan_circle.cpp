@@ -2,6 +2,9 @@
 // Created by waxz on 23-1-4.
 //
 
+#include <fstream>
+
+
 #include "ros/ros.h"
 #include "ros/callback_queue.h"
 #include "nav_msgs/OccupancyGrid.h"
@@ -33,6 +36,9 @@
 #include "common/task.h"
 #include "common/suspend.h"
 #include "common/clock_time.h"
+#include "common/subprocess.hpp"
+
+
 
 #include "sensor/laser_scan.h"
 #include "sensor/geometry_types.h"
@@ -556,6 +562,9 @@ int main(int argc, char** argv){
     transform::Transform2d detect_target_relative_tf;
     transform::Transform2d detect_target_absolute_tf;
     bool detect_target_absolute_pose_computed = false;
+    bool detect_target_stop_update = false;
+    float detect_target_stop_update_dist = 0.3;
+    const char* detect_target_stop_update_dist_param = "detect_target_stop_update_dist";
 
     std::array<float,4> shelf_empty_region{0.0,0.0,0.0,0.0};
 
@@ -567,7 +576,11 @@ int main(int argc, char** argv){
 
     // shelf len_x, len_y
     std::vector<float> shelf_len_y_x{0.0,0.0};
+    std::vector<float> shelf_len_y_x_real{0.0,0.0};
+
     const char* shelf_len_y_x_param = "shelf_len_y_x";
+    const char* shelf_len_y_x_real_param = "shelf_len_y_x_real";
+
     /*
      1. first detect shelf
      maybe 4 legs or 2 legs
@@ -642,8 +655,12 @@ int main(int argc, char** argv){
     std::vector<int> shelf_leg_important_index{0,1,2,3};
     std::vector< std::array<int,10>> shelf_leg_match_result;
     float pattern_match_radius = 0.05;
+    const char* pattern_match_radius_param = "pattern_match_radius";
     int shelf_leg_min_matched_num = 4;
     float shelf_max_fit_error = 0.04;
+    std::vector<float> shelf_rect_diff{0.05,0.05, 0.05}; // edge1_diff, edge2_diff, angle_diff
+    const char* shelf_rect_diff_param = "shelf_rect_diff";
+
 
 
 //    std::vector<geometry::DetectTarget > shelf_leg_laser_pose;
@@ -717,6 +734,9 @@ int main(int argc, char** argv){
     const char* control_target_distance_param = "control_target_distance";
     const char* enable_control_param = "enable_control";
 
+    float control_interpolate_dist = 0.05;
+    const char* control_interpolate_dist_param = "control_interpolate_dist";
+
     // if angle_diff is bigger than rotate_angle_up_bound
     // robot should rotate to minimize angle_diff first
     // then move forward
@@ -753,6 +773,12 @@ int main(int argc, char** argv){
     const char* forward_pid_control_ki_param = "forward_pid_control_ki";
     const char* forward_pid_control_kd_param = "forward_pid_control_kd";
     const char* forward_pid_control_scale_param = "forward_pid_control_scale";
+
+
+    float static_rotate_vel = 0.1;
+    float static_forward_vel = 0.1;
+    const char* static_rotate_vel_param = "static_rotate_vel";
+    const char* static_forward_vel_param = "static_forward_vel";
 
 
     float final_control_dist = 0.05;
@@ -797,10 +823,18 @@ int main(int argc, char** argv){
 
         if(std::strcmp(mode.c_str(), MODE_SHELF4) == 0){
 
+#if 0
             float leg1[2] = {0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
             float leg2[2] = {0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
             float leg3[2] = {-0.5*shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
             float leg4[2] = {-0.5*shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+
+#endif
+            float leg1[2] = {0.0, 0.5*shelf_len_y_x[0]};
+            float leg2[2] = {0.0, -0.5*shelf_len_y_x[0]};
+            float leg3[2] = {-shelf_len_y_x[1],0.5*shelf_len_y_x[0]};
+            float leg4[2] = {-shelf_len_y_x[1],-0.5*shelf_len_y_x[0]};
+
 
             shelf_leg_base_pose.resize(4);
 
@@ -812,7 +846,7 @@ int main(int argc, char** argv){
 //            shelf_empty_region
             shelf_filter_points_segments.resize(4);
             shelf_leg_front_pose.resize(4);
-            shelf_leg_min_matched_num = 3;
+            shelf_leg_min_matched_num = 4;
         }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
             float leg1[2] = {0.0,0.5*shelf_len_y_x[0]};
             float leg2[2] = {0.0,-0.5*shelf_len_y_x[0]};
@@ -833,6 +867,7 @@ int main(int argc, char** argv){
         nh_private.getParam(detect_target_relative_pose_param, detect_target_relative_pose);
 
         nh_private.getParam(shelf_len_y_x_param, shelf_len_y_x);
+        shelf_len_y_x_real = shelf_len_y_x;
 
         if(detect_target_relative_pose.size() != 5 ){
             std::cerr << "detect_target_relative_pose size error"<< std::endl;
@@ -892,6 +927,15 @@ int main(int argc, char** argv){
         nh_private.getParam(front_min_num_param, front_min_num);
 
 
+        nh_private.getParam(pattern_match_radius_param, pattern_match_radius);
+
+        nh_private.getParam(shelf_rect_diff_param, shelf_rect_diff);
+
+
+
+        nh_private.getParam(detect_target_stop_update_dist_param, detect_target_stop_update_dist);
+
+
         nh_private.getParam(max_fit_error_param, max_fit_error);
         nh_private.getParam(sleep_time_param, sleep_time);
         nh_private.getParam(tf_wait_time_param, tf_wait_time);
@@ -929,12 +973,17 @@ int main(int argc, char** argv){
         nh_private.getParam(control_target_distance_param, control_target_distance);
         nh_private.getParam(enable_control_param, enable_control);
 
+        nh_private.getParam(control_interpolate_dist_param, control_interpolate_dist);
+
 
         nh_private.getParam(control_dist_tolerance_param, control_dist_tolerance);
         nh_private.getParam(control_angle_tolerance_param, control_angle_tolerance);
         nh_private.getParam(control_forward_vel_tolerance_param, control_forward_vel_tolerance);
         nh_private.getParam(control_rotate_vel_tolerance_param,control_rotate_vel_tolerance);
 
+
+        nh_private.getParam(static_rotate_vel_param, static_rotate_vel);
+        nh_private.getParam(static_forward_vel_param, static_forward_vel);
 
 
 
@@ -1059,6 +1108,7 @@ int main(int argc, char** argv){
         run_command_last = run_command;
         first_detect_ok = false;
         detect_target_absolute_pose_computed = false;
+        detect_target_stop_update = false;
         start_run = load_params();
         control_finished_cnt = 0;
         rotate_pid.reset();
@@ -1163,23 +1213,27 @@ int main(int argc, char** argv){
 
                 }
 
-                if(find_result.empty()){
-                    continue;
-                }
 
-                std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
-                    return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
-                });
+
+
 
                 int best_result_id = 0;
-                while(find_result[best_result_id].match_error > max_fit_error){
+                if(find_result.empty()){
+                    best_result_id = -1;
+                }else{
+                    std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
+                        return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
+                    });
+                    while(find_result[best_result_id].match_error > max_fit_error){
 
-                    best_result_id++;
-                    if(best_result_id == find_result.size()){
-                        best_result_id = -1;
-                        break;
+                        best_result_id++;
+                        if(best_result_id == find_result.size()){
+                            best_result_id = -1;
+                            break;
+                        }
                     }
                 }
+
 
                 if(best_result_id == -1){
 
@@ -1294,7 +1348,6 @@ int main(int argc, char** argv){
                 if(!enable_control){
                     continue;
                 }
-
                 PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
                 PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
                 cmd_vel_pub.publish(cmd_vel_msg);
@@ -1394,68 +1447,243 @@ int main(int argc, char** argv){
 
 
                 perception::FindMatchPattern(shelf_leg_base_pose,shelf_leg_front_pose,pattern_match_radius, shelf_leg_min_matched_num,shelf_leg_match_result );
+                PLOGD << "shelf_leg_match_result.size " << shelf_leg_match_result.size() << std::endl;
 
-                std::sort(shelf_leg_match_result.begin(),shelf_leg_match_result.end(), [](auto& v1, auto& v2){
-
-                    return v1.back() < v2.back();
-                });
-
-                PLOGD << "shelf_leg_match_result size " << shelf_leg_match_result.size() << std::endl;
+                int best_result_id = 0;
                 if(shelf_leg_match_result.empty()){
-                    detect_results_msg.header.stamp = scan_time;
-                    detect_results_msg.header.frame_id.assign(laser_frame);
+                    best_result_id = -1;
+                }else{
+                    std::sort(shelf_leg_match_result.begin(),shelf_leg_match_result.end(), [](auto& v1, auto& v2){
 
-                    detect_results_pub.publish(detect_results_msg);
-                    continue;
+                        return v1.back() < v2.back();
+                    });
+
+
+                    float best_edge_12 = 1000.0;
+                    int best_edge_id = -1;
+                    //
+                    if(!first_detect_ok){
+
+
+                        while(best_result_id < shelf_leg_match_result.size()){
+
+
+                            /*
+
+                             l1     l2
+
+
+                             l3     l4
+
+                                 |x
+                               y-| robot
+
+                             *
+                             * */
+                            auto& result = shelf_leg_match_result[best_result_id];
+
+                            PLOGD << "check match result: " << result[0] << ", " << result[1] << ", " << result[2] << ", " << result[3] << std::endl;
+                            auto& detect_leg1 = shelf_leg_front_pose[0][result[0]];
+                            auto& detect_leg2 = shelf_leg_front_pose[1][result[1]];
+
+                            auto& detect_leg3 = shelf_leg_front_pose[2][result[2]];
+                            auto& detect_leg4 = shelf_leg_front_pose[3][result[3]];
+
+                            float edge_12 = std::sqrt( (detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0])*(detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) +  (detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])*(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])   );
+                            float edge_34 = std::sqrt( (detect_leg4.pose_in_laser[0] - detect_leg3.pose_in_laser[0])*(detect_leg4.pose_in_laser[0] - detect_leg3.pose_in_laser[0]) +  (detect_leg4.pose_in_laser[1] - detect_leg3.pose_in_laser[1])*(detect_leg4.pose_in_laser[1] - detect_leg3.pose_in_laser[1])   );
+
+                            float edge_13 = std::sqrt( (detect_leg3.pose_in_laser[0] - detect_leg1.pose_in_laser[0])*(detect_leg3.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) +  (detect_leg3.pose_in_laser[1] - detect_leg1.pose_in_laser[1])*(detect_leg3.pose_in_laser[1] - detect_leg1.pose_in_laser[1])   );
+                            float edge_24 = std::sqrt( (detect_leg4.pose_in_laser[0] - detect_leg2.pose_in_laser[0])*(detect_leg4.pose_in_laser[0] - detect_leg2.pose_in_laser[0]) +  (detect_leg4.pose_in_laser[1] - detect_leg2.pose_in_laser[1])*(detect_leg4.pose_in_laser[1] - detect_leg2.pose_in_laser[1])   );
+
+
+
+                            float angle31 = std::atan2(detect_leg1.pose_in_laser[1] - detect_leg3.pose_in_laser[1]  ,detect_leg1.pose_in_laser[0] - detect_leg3.pose_in_laser[0]);
+                            float angle42 = std::atan2(detect_leg2.pose_in_laser[1] - detect_leg4.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg4.pose_in_laser[0]);
+                            float angle21 = std::atan2(detect_leg1.pose_in_laser[1] - detect_leg2.pose_in_laser[1]  ,detect_leg1.pose_in_laser[0] - detect_leg2.pose_in_laser[0]);
+                            float angle43 = std::atan2(detect_leg3.pose_in_laser[1] - detect_leg4.pose_in_laser[1]  ,detect_leg3.pose_in_laser[0] - detect_leg4.pose_in_laser[0]);
+
+                            float rect_angle1 = angle21 - angle_normalise(angle31, angle21);
+                            float rect_angle2 = angle21 - angle_normalise(angle42, angle21);
+                            float rect_angle3 = angle43 - angle_normalise(angle31, angle43);
+                            float rect_angle4 = angle43 - angle_normalise(angle42, angle43);
+
+                            char msg[500];
+                            sprintf(msg,"shelf_len_y_x_real: [%.3f,%.3f], [%.3f,%.3f], angle31:%.3f, angle42:%.3f, angle21:%.3f, angle43:%.3f, rect_angle1:%.3f, rect_angle2:%.3f, rect_angle3:%.3f, rect_angle4:%.3f",
+                                    edge_12, edge_13 , edge_34 ,edge_24,angle31,angle42 ,angle21,angle43, rect_angle1, rect_angle2, rect_angle3, rect_angle4);
+                            PLOGD << msg << std::endl;
+
+                            bool valid = std::abs(edge_12 - edge_34) <  shelf_rect_diff[0]
+                                    && std::abs(edge_13 - edge_24) <  shelf_rect_diff[1]
+                                    && std::abs(rect_angle1 - M_PI_2) < shelf_rect_diff[2]
+                                    && std::abs(rect_angle2 - M_PI_2) < shelf_rect_diff[2]
+                                    && std::abs(rect_angle3 - M_PI_2) < shelf_rect_diff[2]
+                                    && std::abs(rect_angle4 - M_PI_2) < shelf_rect_diff[2]
+//                                    && std::abs(detect_leg1.pose_in_laser[0]) > std::abs(detect_leg3.pose_in_laser[0])
+//                                    && std::abs(detect_leg2.pose_in_laser[0]) > std::abs(detect_leg4.pose_in_laser[0])
+
+                                    ;
+
+
+
+                            result.back() = 500.0f*(std::abs(edge_12 - edge_34) + std::abs(edge_13 - edge_24));
+                            if(valid){
+
+                                if(edge_12 < best_edge_12){
+
+                                    best_edge_12 = edge_12;
+                                    best_edge_id = best_result_id;
+
+                                    PLOGD << "get valid rect, write to file" << std::endl;
+
+                                    shelf_len_y_x_real[0] = edge_12;
+                                    shelf_len_y_x_real[1] = edge_34;
+                                    shelf_leg_base_pose.resize(2);
+                                    shelf_leg_min_matched_num = 2;
+
+
+                                    nh_private.setParam(shelf_len_y_x_real_param, shelf_len_y_x_real);
+                                    std::ofstream t("/tmp/shelf.txt");
+                                    t << msg;
+                                }
+                            }
+
+                            best_result_id++;
+                            if(best_result_id == shelf_leg_match_result.size()){
+                                best_result_id = -1;
+                                break;
+                            }
+                        }
+
+                        best_result_id = best_edge_id;
+
+
+
+                    }else{
+
+                        while(best_result_id < shelf_leg_match_result.size()){
+
+                            auto& result = shelf_leg_match_result[best_result_id];
+
+                            PLOGD << "check match result: " << result[0] << ", " << result[1] << ", " << result[2] << ", " << result[3] << std::endl;
+                            auto& detect_leg1 = shelf_leg_front_pose[0][result[0]];
+                            auto& detect_leg2 = shelf_leg_front_pose[1][result[1]];
+                            float edge_12 = std::sqrt( (detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0])*(detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) +  (detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])*(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])   );
+
+                            if(edge_12 < best_edge_12){
+
+                                best_edge_12 = edge_12;
+                                best_edge_id = best_result_id;
+
+                            }
+
+                            best_result_id++;
+                            if(best_result_id == shelf_leg_match_result.size()){
+                                best_result_id = -1;
+                                break;
+                            }
+
+                        }
+                        best_result_id = best_edge_id;
+
+
+                    }
                 }
 
-                auto& best_result = shelf_leg_match_result.front();
 
-                PLOGD << "shelf_leg_match_result best_result.back() " << best_result.back()  << std::endl;
+                cloud_target_pub.publish(marker_array_msg);
 
-                if( ( best_result.back() > shelf_max_fit_error*1000.0) || (best_result[0] == -1) || (best_result[1] == -1) ){
-                    detect_results_msg.header.stamp = scan_time;
-                    detect_results_msg.header.frame_id.assign(laser_frame);
 
-                    detect_results_pub.publish(detect_results_msg);
-
-                    continue;
-
+                if(detect_target_absolute_pose_computed && detect_target_stop_update){
+                    best_result_id = -1;
                 }
 
+                if(best_result_id == -1){
 
-                // check matched legs
-                auto& detect_leg1 = shelf_leg_front_pose[0][best_result[0]];
-                auto& detect_leg2 = shelf_leg_front_pose[1][best_result[1]];
+                    if(!detect_target_absolute_pose_computed){
+                        PLOGD << "find target fail " << std::endl;
 
-                PLOGD << "check two leg" << std::endl;
-                PLOGD << shelf_leg_base_pose[0].pose_in_base[0] << ", " << shelf_leg_base_pose[0].pose_in_base[1] << ", " << shelf_leg_base_pose[0].pose_in_laser[0] << ", " << shelf_leg_base_pose[0].pose_in_laser[1] << std::endl;
-                PLOGD << shelf_leg_base_pose[1].pose_in_base[0] << ", " << shelf_leg_base_pose[1].pose_in_base[1] << ", " << shelf_leg_base_pose[1].pose_in_laser[0] << ", " << shelf_leg_base_pose[1].pose_in_laser[1] << std::endl;
+                        detect_results_msg.header.stamp = scan_time;
+                        detect_results_msg.header.frame_id.assign(laser_frame);
 
-                PLOGD << detect_leg1.pose_in_base[0] << ", " << detect_leg1.pose_in_base[1] << ", " << detect_leg1.pose_in_laser[0] << ", " << detect_leg1.pose_in_laser[1] << std::endl;
-                PLOGD << detect_leg2.pose_in_base[0] << ", " << detect_leg2.pose_in_base[1] << ", " << detect_leg2.pose_in_laser[0] << ", " << detect_leg2.pose_in_laser[1] << std::endl;
+                        detect_results_pub.publish(detect_results_msg);
+                        continue;
+                    }else{
+                        if(tf_get_odom_base){
+                            detect_target_relative_tf = tf_odom_base.inverse()*detect_target_absolute_tf;
+
+                        }
+
+                    }
+                }else{
+
+
+                    // check matched legs
+                    auto& best_result = shelf_leg_match_result[best_result_id];
+
+                    auto& detect_leg1 = shelf_leg_front_pose[0][best_result[0]];
+                    auto& detect_leg2 = shelf_leg_front_pose[1][best_result[1]];
+                    float edge_12 = std::sqrt( (detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0])*(detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) +  (detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])*(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])   );
+                    shelf_len_y_x_real[0] = edge_12;
+
+
+                    PLOGD << "check two leg" << std::endl;
+                    PLOGD << shelf_leg_base_pose[0].pose_in_base[0] << ", " << shelf_leg_base_pose[0].pose_in_base[1] << ", " << shelf_leg_base_pose[0].pose_in_laser[0] << ", " << shelf_leg_base_pose[0].pose_in_laser[1] << std::endl;
+                    PLOGD << shelf_leg_base_pose[1].pose_in_base[0] << ", " << shelf_leg_base_pose[1].pose_in_base[1] << ", " << shelf_leg_base_pose[1].pose_in_laser[0] << ", " << shelf_leg_base_pose[1].pose_in_laser[1] << std::endl;
+
+                    PLOGD << detect_leg1.pose_in_base[0] << ", " << detect_leg1.pose_in_base[1] << ", " << detect_leg1.pose_in_laser[0] << ", " << detect_leg1.pose_in_laser[1] << std::endl;
+                    PLOGD << detect_leg2.pose_in_base[0] << ", " << detect_leg2.pose_in_base[1] << ", " << detect_leg2.pose_in_laser[0] << ", " << detect_leg2.pose_in_laser[1] << std::endl;
+
+
+
+                    target_pose.position.x = 0.5*(detect_leg1.pose_in_laser[0] + detect_leg2.pose_in_laser[0]);
+                    target_pose.position.y = 0.5*(detect_leg1.pose_in_laser[1] + detect_leg2.pose_in_laser[1]);
+
+                    math::yaw_to_quaternion(std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + M_PI_2,
+                                            target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
+
+                    detect_results_msg.poses.emplace_back(target_pose);
+
+
+                    detect_target_relative_tf.set(0.5*(detect_leg1.pose_in_base[0] + detect_leg2.pose_in_base[0]),
+                                                  0.5*(detect_leg1.pose_in_base[1] + detect_leg2.pose_in_base[1]),
+                                                  std::atan2(detect_leg2.pose_in_base[1] - detect_leg1.pose_in_base[1]  ,detect_leg2.pose_in_base[0] - detect_leg1.pose_in_base[0]) + M_PI_2
+                                                  );
+
+
+                    if(tf_get_odom_base){
+                        detect_target_absolute_pose_computed = true;
+                        detect_target_absolute_tf = tf_odom_base * detect_target_relative_tf;
+
+                    }
+                }
 
                 first_detect_ok = true;
-                shelf_leg_min_matched_num = 2;
 
 
 
-                shelf_leg_base_pose[0] = detect_leg1;
-                shelf_leg_base_pose[1] = detect_leg2;
-                shelf_leg_base_pose.resize(2);
+                PLOGD << "control_target_angle: " << control_target_angle << std::endl;
+                PLOGD << "control_target_distance: " << control_target_distance << std::endl;
 
 
+                float leg1[2] = {0.0, 0.5*shelf_len_y_x_real[0]};
+                float leg2[2] = {0.0, -0.5*shelf_len_y_x_real[0]};
+                float control_target_in_shelf[2] = {-control_target_distance,0.0};
+                float control_target_in_base[2] = {0.0,0.0};
+                float control_interpolate_target_in_base[2] = {0.0,0.0};
 
-                target_pose.position.x = 0.5*(detect_leg1.pose_in_laser[0] + detect_leg2.pose_in_laser[0]);
-                target_pose.position.y = 0.5*(detect_leg1.pose_in_laser[1] + detect_leg2.pose_in_laser[1]);
+                detect_target_relative_tf.mul(leg1, 1, shelf_leg_base_pose[0].pose_in_base);
+                detect_target_relative_tf.mul(leg2, 1, shelf_leg_base_pose[1].pose_in_base);
 
-                math::yaw_to_quaternion(std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + 0.5*M_PI,
-                                        target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
+                detect_target_relative_tf.mul(control_target_in_shelf, 1, control_target_in_base);
+                PLOGD << "control_target_in_shelf: " << control_target_in_shelf[0]<<", " << control_target_in_shelf[1] << std::endl;
+                PLOGD << "control_target_in_base: " << control_target_in_base[0]<<", " << control_target_in_base[1] << std::endl;
 
-                detect_results_msg.poses.emplace_back(target_pose);
+                float marker_distance = std::sqrt(control_target_in_base[0]*control_target_in_base[0] + control_target_in_base[1]*control_target_in_base[1]   );
 
-
-
+                float interpolate_distance =  control_target_distance + ( (marker_distance> control_interpolate_dist)?(marker_distance -control_interpolate_dist):(0.0)   );
+                control_target_in_shelf[0] = -interpolate_distance;
+                detect_target_relative_tf.mul(control_target_in_shelf, 1, control_interpolate_target_in_base);
+                PLOGD << "interpolate control_interpolate_target_in_base: " << control_interpolate_target_in_base[0]<<", " << control_interpolate_target_in_base[1] << std::endl;
 
 
                 sensor::LaserScanToPointCloud2(cloud_filtered_points,cloud_filtered_points.size(),cloud_filtered_msg);
@@ -1464,11 +1692,101 @@ int main(int argc, char** argv){
 
                 cloud_filtered_pub.publish(cloud_filtered_msg);
 
-                cloud_target_pub.publish(marker_array_msg);
                 detect_results_msg.header.stamp = scan_time;
                 detect_results_msg.header.frame_id.assign(laser_frame);
 
                 detect_results_pub.publish(detect_results_msg);
+
+
+
+                float marker_angle = std::atan2(control_interpolate_target_in_base[1],control_interpolate_target_in_base[0]);
+                float angle_diff = marker_angle - control_target_angle;
+
+                marker_distance = std::sqrt(control_interpolate_target_in_base[0]*control_interpolate_target_in_base[0] + control_interpolate_target_in_base[1]*control_interpolate_target_in_base[1]   );
+                float distance_diff = marker_distance ;//- control_target_distance;
+
+                PLOGD << "angle_diff: " << angle_diff << std::endl;
+                PLOGD << "distance_diff: " << distance_diff << std::endl;
+
+                PLOGD << "detect_target_stop_update: " << detect_target_stop_update << std::endl;
+
+
+
+                {
+                    if( std::abs(angle_diff) > final_control_angle){
+                        cmd_vel_msg.angular.z =  final_control_angle*rotate_pid_control_kp*(angle_diff> 0.0 ? 1.0:-1.0);;
+                        cmd_vel_msg.angular.z =  static_rotate_vel*(angle_diff> 0.0 ? 1.0:-1.0);;
+
+                    }else{
+                        double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
+                        PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
+
+                        if(std::abs(rotate_pid_inc) < control_rotate_vel_tolerance || std::abs(angle_diff) < control_angle_tolerance){
+                            rotate_pid_inc = 0.0;
+                        }
+                        cmd_vel_msg.angular.z =  rotate_pid_inc;
+
+                    }
+                }
+
+                if(std::abs(control_target_in_base[0]) <detect_target_stop_update_dist){
+                    cmd_vel_msg.angular.z =  0.0;
+
+                }
+
+
+
+
+                float target_pose_x = distance_diff * std::cos(marker_angle);
+
+
+//            if(std::abs(angle_diff) < 0.02)
+                {
+
+                    if(std::abs(target_pose_x) > final_control_dist){
+                        cmd_vel_msg.linear.x =  final_control_dist*forward_pid_control_kp*(target_pose_x> 0.0 ? 1.0:-1.0);
+                        cmd_vel_msg.linear.x =  static_forward_vel;
+
+                    }else{
+                        double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
+
+                        PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
+                        if(std::abs(forward_pid_inc) < control_forward_vel_tolerance || std::abs(target_pose_x) < control_dist_tolerance){
+                            forward_pid_inc = 0.0;
+                        }
+                        cmd_vel_msg.linear.x =  forward_pid_inc;
+                    }
+
+                    debug_info_msg.x =target_pose_x;
+                    debug_info_msg.y =marker_angle;
+
+                    debug_info_pub.publish(debug_info_msg);
+
+                }
+
+
+
+                PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
+                PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
+                if(!enable_control){
+                    continue;
+                }
+
+                cmd_vel_pub.publish(cmd_vel_msg);
+
+                if(std::abs(target_pose_x)<control_dist_tolerance
+//                && std::abs(angle_diff) < control_angle_tolerance
+                ){
+                    PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+
+                    control_finished_cnt++;
+                    if(control_finished_cnt > 10){
+                        start_run = 0;
+                    }
+                }
+
+
+
 
 
             }else if(std::strcmp(mode.c_str(), MODE_SHELF2) == 0){
@@ -1490,13 +1808,28 @@ int main(int argc, char** argv){
 
     }
 
+    if(enable_control&&(control_finished_cnt>0)){
 
-    cmd_vel_msg.angular.z = 0.0;
-    cmd_vel_msg.linear.x = 0.0;
-    for(int i = 0; i < 5;i++){
-        cmd_vel_pub.publish(cmd_vel_msg);
-        ros::spinOnce();
-        suspend.sleep(500.0);
+        const char* final_cmd_vel = R"(
+rostopic pub -1 /cmd_vel geometry_msgs/Twist "linear:
+  x: 0.0
+  y: 0.0
+  z: 0.0
+angular:
+  x: 0.0
+  y: 0.0
+  z: 0.0"
+)";
+
+
+        namespace sp = subprocess;
+        auto p = sp::Popen(
+                {"bash", "-c", final_cmd_vel}, sp::output{sp::PIPE},
+                sp::error{sp::PIPE}, sp::defer_spawn{true});
+        //   auto p = sp::Popen({"bash", "-c", cmd_string},
+        //   sp::shell{true}, sp::defer_spawn{true});
+
+        p.start_process();
     }
 
 
