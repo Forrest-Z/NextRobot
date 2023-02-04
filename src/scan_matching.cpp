@@ -33,7 +33,21 @@
 
 #include "common/task.h"
 #include "common/suspend.h"
+#include "common/common_io.h"
+#include "common/type_traits.h"
+
+
 #include "sensor/laser_scan.h"
+#include "sensor/pointcloud_ros.h"
+#include "sensor/pointcloud_pcl.h"
+#include "sensor/pointcloud_pcl_ros.h"
+
+#include "perception/laserscan_filter.h"
+
+#include "perception/pcl_pointcloud_normal_estmation_2d.h"
+
+#include "transform/pose_filter.h"
+
 
 #include <pcl/point_types.h>
 #include <pcl/filters/radius_outlier_removal.h>
@@ -102,10 +116,15 @@ namespace fs = ghc::filesystem;
 #include "icp/Normal2dEstimation.h"
 
 
+#include "ros_tool/RvizInteractiveControlTool.h"
+
+
 #include "nlohmann/json.hpp"
 #include <plog/Log.h> // Step1: include the headers
 #include "plog/Initializers/RollingFileInitializer.h"
 #include "plog/Appenders/ColorConsoleAppender.h"
+
+
 
 
 namespace serialization {
@@ -137,416 +156,19 @@ namespace serialization {
 
 
 
-void toEulerAngle(const float x, const float y, const float z, const float w, float &roll, float &pitch, float &yaw) {
-// roll (x-axis rotation)
-    float sinr_cosp = +2.0 * (w * x + y * z);
-    float cosr_cosp = +1.0 - 2.0 * (x * x + y * y);
-    roll = atan2(sinr_cosp, cosr_cosp);
 
-// pitch (y-axis rotation)
-    float sinp = +2.0 * (w * y - z * x);
-    if (fabs(sinp) >= 1)
-        pitch = copysign(M_PI / 2, sinp); // use 90 degrees if out of range
-    else
-        pitch = asin(sinp);
-
-// yaw (z-axis rotation)
-    float siny_cosp = +2.0 * (w * z + x * y);
-    float cosy_cosp = +1.0 - 2.0 * (y * y + z * z);
-    yaw = atan2(siny_cosp, cosy_cosp);
-//    return yaw;
-}
-
-void to_yaw(const float x, const float y, const float z, const float w, float &yaw) {
-// roll (x-axis rotation)
-    float sinr_cosp = +2.0 * (w * x + y * z);
-    float cosr_cosp = +1.0 - 2.0 * (x * x + y * y);
-
-// pitch (y-axis rotation)
-    float sinp = +2.0 * (w * y - z * x);
-
-
-// yaw (z-axis rotation)
-    float siny_cosp = +2.0 * (w * z + x * y);
-    float cosy_cosp = +1.0 - 2.0 * (y * y + z * z);
-    yaw = atan2(siny_cosp, cosy_cosp);
-//    return yaw;
-}
-
-
-void yaw_to_quaternion(float yaw, double &qx, double &qy, double &qz, double &qw) {
-    float roll = 0.0;
-    float pitch = 0.0;
-
-    qx = 0.0;
-    qy = 0.0;
-    qz = sin(yaw * 0.5f);
-    qw = cos(yaw * 0.5f);
-
-    qx = sin(roll / 2) * cos(pitch / 2) * cos(yaw / 2) - cos(roll / 2) * sin(pitch / 2) * sin(yaw / 2);
-    qy = cos(roll / 2) * sin(pitch / 2) * cos(yaw / 2) + sin(roll / 2) * cos(pitch / 2) * sin(yaw / 2);
-    qz = cos(roll / 2) * cos(pitch / 2) * sin(yaw / 2) - sin(roll / 2) * sin(pitch / 2) * cos(yaw / 2);
-    qw = cos(roll / 2) * cos(pitch / 2) * cos(yaw / 2) + sin(roll / 2) * sin(pitch / 2) * sin(yaw / 2);
-
-}
-
-namespace ros_tool {
-    class InteractiveTf {
-        ros::NodeHandle nh_;
-        boost::shared_ptr<interactive_markers::InteractiveMarkerServer> server_;
-
-        void processFeedback(unsigned ind, const visualization_msgs::InteractiveMarkerFeedbackConstPtr &feedback);
-
-        visualization_msgs::InteractiveMarker int_marker_;
-
-        geometry_msgs::Pose pose_;
-        tf::TransformBroadcaster br_;
-        std::string parent_frame_;
-        std::string frame_;
-
-        void updateTf(int, const ros::TimerEvent &event);
-
-        ros::Timer tf_timer_;
-
-        std::function<void(const geometry_msgs::Pose &)> m_callback;
-        bool is_start = false;
-
-    public:
-        InteractiveTf(const std::string &t_parent_frame, const std::string &t_target_frame);
-
-        ~InteractiveTf();
-
-        void start(float scale = 1.0, bool pub_tf = false);
-
-        void setInitPose(float x, float y, float yaw);
-
-        geometry_msgs::Pose &getPose();
-
-        void setCallBack(std::function<void(const geometry_msgs::Pose &)> &&);
-    };
-
-
-    void InteractiveTf::setCallBack(std::function<void(const geometry_msgs::Pose &)> &&t_cb) {
-        m_callback = std::move(t_cb);
-    }
-
-    void InteractiveTf::setInitPose(float x, float y, float yaw) {
-        pose_.position.x = x;
-        pose_.position.y = y;
-        pose_.position.z = 1.0;
-
-        yaw_to_quaternion(yaw, pose_.orientation.x, pose_.orientation.y, pose_.orientation.z, pose_.orientation.w);
-
-    }
-
-    geometry_msgs::Pose &InteractiveTf::getPose() {
-        return pose_;
-    }
-
-    InteractiveTf::InteractiveTf(const std::string &t_parent_frame, const std::string &t_target_frame) :
-            parent_frame_(t_parent_frame),
-            frame_(t_target_frame) {}
-
-    void InteractiveTf::start(float scale, bool pub_tf) {
-
-        if(is_start){
-            std::cout << "InteractiveTf is already running" << std::endl;
-
-            return;
-        }
-
-        server_.reset(new interactive_markers::InteractiveMarkerServer("interactive_tf"));
-
-        // TODO(lucasw) need way to get parameters out- tf echo would work
-
-        int_marker_.header.frame_id = parent_frame_;
-        // http://answers.ros.org/question/262866/interactive-marker-attached-to-a-moving-frame/
-        // putting a timestamp on the marker makes it not appear
-        // int_marker_.header.stamp = ros::Time::now();
-        int_marker_.name = "interactive_tf";
-        int_marker_.description = "control a tf with 6dof";
-        int_marker_.pose = pose_;
-        int_marker_.scale = 1.0;
-
-        {
-            visualization_msgs::InteractiveMarkerControl control;
-
-            // TODO(lucasw) get roll pitch yaw and set as defaults
-
-            control.orientation.w = 1;
-            control.orientation.x = 1;
-            control.orientation.y = 0;
-            control.orientation.z = 0;
-            control.name = "rotate_x";
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
-//            int_marker_.controls.push_back(control);
-            control.name = "move_x";
-            // TODO(lucasw) how to set initial values?
-            // double x = 0.0;
-            // ros::param::get("~x", x);
-            // control.pose.position.x = x;
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::MOVE_AXIS;
-            int_marker_.controls.push_back(control);
-            // control.pose.position.x = 0.0;
-
-            control.orientation.w = 1;
-            control.orientation.x = 0;
-            control.orientation.y = 0;
-            control.orientation.z = 1;
-            control.name = "rotate_y";
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
-//            int_marker_.controls.push_back(control);
-            control.name = "move_y";
-            // double y = 0.0;
-            // control.pose.position.z = ros::param::get("~y", y);
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::MOVE_AXIS;
-            int_marker_.controls.push_back(control);
-            // control.pose.position.y = 0.0;
-
-            control.orientation.w = 1;
-            control.orientation.x = 0;
-            control.orientation.y = 1;
-            control.orientation.z = 0;
-            control.name = "rotate_z";
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::ROTATE_AXIS;
-            int_marker_.controls.push_back(control);
-            control.name = "move_z";
-            // double z = 0.0;
-            // control.pose.position.z = ros::param::get("~z", z);
-            control.interaction_mode = visualization_msgs::InteractiveMarkerControl::MOVE_AXIS;
-//            int_marker_.controls.push_back(control);
-            // control.pose.position.z = 0.0;
-
-
-        }
-
-        server_->insert(int_marker_);
-        server_->setCallback(int_marker_.name,
-                             boost::bind(&InteractiveTf::processFeedback, this, 0, boost::placeholders::_1));
-        // server_->setCallback(int_marker_.name, testFeedback);
-
-        server_->applyChanges();
-
-        if (pub_tf) {
-            tf_timer_ = nh_.createTimer(ros::Duration(0.05),
-                                        boost::bind(&InteractiveTf::updateTf, this, 0, boost::placeholders::_1));
-        }
-        is_start = true;
-        std::cout << "InteractiveTf start" << std::endl;
-    }
-
-    InteractiveTf::~InteractiveTf() {
-        server_.reset();
-    }
-
-    void InteractiveTf::updateTf(int, const ros::TimerEvent &event) {
-        tf::Transform transform;
-        transform.setOrigin(tf::Vector3(pose_.position.x, pose_.position.y, pose_.position.z));
-        transform.setRotation(tf::Quaternion(pose_.orientation.x,
-                                             pose_.orientation.y,
-                                             pose_.orientation.z,
-                                             pose_.orientation.w));
-        br_.sendTransform(tf::StampedTransform(transform, ros::Time::now(),
-                                               parent_frame_, frame_));
-    }
-
-    void InteractiveTf::processFeedback(
-            unsigned ind,
-            const visualization_msgs::InteractiveMarkerFeedbackConstPtr &feedback) {
-        ROS_DEBUG_STREAM(feedback->header.frame_id);
-        pose_ = feedback->pose;
-        if (m_callback) {
-            m_callback(pose_);
-        }
-        ROS_DEBUG_STREAM(feedback->control_name);
-        ROS_DEBUG_STREAM(feedback->event_type);
-        ROS_DEBUG_STREAM(feedback->mouse_point);
-        // TODO(lucasw) all the pose changes get handled by the server elsewhere?
-        server_->applyChanges();
-    }
-}
 
 
 // LaserScan to PointCloud
 
-void createPointCloud2(sensor_msgs::PointCloud2 &cloud, const std::vector<std::string> &filed) {
-//    cloud.header.frame_id = "map";
-    cloud.height = 1;
-    int filed_num = filed.size();
-
-    cloud.point_step = 4 * filed_num;
-    cloud.is_dense = false;
-    cloud.is_bigendian = false;
-    cloud.fields.resize(filed_num);
-
-    for (int i = 0; i < filed_num; i++) {
-
-        cloud.fields[i].name = filed[i];
-        cloud.fields[i].offset = 4 * i;
-        cloud.fields[i].datatype = sensor_msgs::PointField::FLOAT32;
-        cloud.fields[i].count = 1;
-    }
-#if 0
-    cloud.fields[0].name = "x";
-    cloud.fields[0].offset = 0;
-    cloud.fields[0].datatype = sensor_msgs::PointField::FLOAT32;
-    cloud.fields[0].count = 1;
-
-    cloud.fields[1].name = "y";
-    cloud.fields[1].offset = 4;
-    cloud.fields[1].datatype = sensor_msgs::PointField::FLOAT32;
-    cloud.fields[1].count = 1;
-
-    cloud.fields[2].name = "z";
-    cloud.fields[2].offset = 8;
-    cloud.fields[2].datatype = sensor_msgs::PointField::FLOAT32;
-    cloud.fields[2].count = 1;
-
-    cloud.fields[3].name = "intensity";
-    cloud.fields[3].offset = 12;
-    cloud.fields[3].datatype = sensor_msgs::PointField::FLOAT32;
-    cloud.fields[3].count = 1;
-#endif
-
-}
 
 /*
  fill cloud filed [x,y]
  */
-void LaserScanToPointCloud2(const std::vector<float> &scan_points, int point_num, sensor_msgs::PointCloud2 &cloud) {
-    int point_num_ = 0.5 * (scan_points.size());
-    if (point_num_ <= point_num) {
-        return;
-    }
-    cloud.row_step = point_num * cloud.point_step;
-    cloud.data.resize(cloud.row_step);
-    cloud.width = point_num;
-    for (int i = 0; i < point_num; i++) {
-        uint8_t *data_pointer = &cloud.data[0] + i * cloud.point_step;
-        *(float *) data_pointer = scan_points[i + i];
-        data_pointer += 4;
-        *(float *) data_pointer = scan_points[i + i + 1];
-        data_pointer += 4;
-        *(float *) data_pointer = 0.0;
-
-    }
-}
-
-void LaserScanToPclPointCloud(const std::vector<float> &scan_points, int point_num,
-                              pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr) {
 
 
-//    PLOGD <<"point_num: " << point_num << std::endl;
-    auto &cloud = *cloud_ptr;
-    // Fill in the cloud data
-    cloud.width = point_num;
-    cloud.height = 1;
-//    cloud.is_dense = true;
-    cloud.resize(cloud.width * cloud.height, pcl::PointXYZ{0.0, 0.0, 0.0});
-
-    for (int i = 0; i < point_num; i++) {
-        cloud[i].x = scan_points[i + i];
-        cloud[i].y = scan_points[i + i + 1];
-
-    }
-
-}
-
-void LaserScanToPclPointCloud(const std::vector<float> &scan_points, int point_num,
-                              pcl::PointCloud<pcl::PointNormal>::Ptr cloud_ptr) {
 
 
-    auto &cloud = *cloud_ptr;
-    // Fill in the cloud data
-    cloud.width = point_num;
-    cloud.height = 1;
-//    cloud.is_dense = true;
-    cloud.resize(cloud.width * cloud.height, pcl::PointNormal{0.0, 0.0, 0.0});
-
-    for (int i = 0; i < point_num; i++) {
-        cloud[i].x = scan_points[i + i];
-        cloud[i].y = scan_points[i + i + 1];
-
-    }
-
-}
-
-// PointCloud to
-void PclPointCloudToPointCloud2(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr, sensor_msgs::PointCloud2 &cloud) {
-    cloud.width = cloud_ptr->width;
-
-    int point_num = cloud_ptr->size();
-
-    cloud.row_step = point_num * cloud.point_step;
-    cloud.data.resize(cloud.row_step);
-    cloud.width = point_num;
-    for (int i = 0; i < point_num; i++) {
-        uint8_t *data_pointer = &cloud.data[0] + i * cloud.point_step;
-        *(float *) data_pointer = cloud_ptr->at(i).x;
-        data_pointer += 4;
-        *(float *) data_pointer = cloud_ptr->at(i).y;
-        data_pointer += 4;
-        *(float *) data_pointer = 0.0;
-
-    }
-
-
-}
-
-// PointCloud to
-void PclPointCloudToPointCloud2(pcl::PointCloud<pcl::PointNormal>::Ptr cloud_ptr, sensor_msgs::PointCloud2 &cloud) {
-    cloud.width = cloud_ptr->width;
-
-    int point_num = cloud_ptr->size();
-
-    cloud.row_step = point_num * cloud.point_step;
-    cloud.data.resize(cloud.row_step);
-    cloud.width = point_num;
-    for (int i = 0; i < point_num; i++) {
-        uint8_t *data_pointer = &cloud.data[0] + i * cloud.point_step;
-        *(float *) data_pointer = cloud_ptr->at(i).x;
-        data_pointer += 4;
-        *(float *) data_pointer = cloud_ptr->at(i).y;
-        data_pointer += 4;
-        *(float *) data_pointer = 0.0;
-    }
-}
-
-void PclPointCloudToPoseArray(pcl::PointCloud<pcl::PointNormal>::Ptr cloud_ptr, geometry_msgs::PoseArray &pose_array) {
-
-
-    int point_num = cloud_ptr->size();
-
-    pose_array.poses.resize(point_num);
-
-    float yaw = 0.0;
-//    std::cout << "\nshow all yaw:\n";
-    for (int i = 0; i < point_num; i++) {
-        pose_array.poses[i].position.x = cloud_ptr->points[i].x;
-        pose_array.poses[i].position.y = cloud_ptr->points[i].y;
-        pose_array.poses[i].position.z = cloud_ptr->points[i].z;
-
-//        pose_array.poses[i].orientation.x = 0.0;
-//        pose_array.poses[i].orientation.y = 0.0;
-//        pose_array.poses[i].orientation.z = 0.0;
-//        pose_array.poses[i].orientation.w = 1.0;
-
-
-        yaw = atan2(cloud_ptr->points[i].normal_y, cloud_ptr->points[i].normal_x);
-//        std::cout << "[" << yaw << ", " << cloud_ptr->points[i].normal_y << ", " << cloud_ptr->points[i].normal_x << "], ";
-        yaw_to_quaternion(yaw, pose_array.poses[i].orientation.x, pose_array.poses[i].orientation.y,
-                          pose_array.poses[i].orientation.z, pose_array.poses[i].orientation.w);
-
-    }
-//    std::cout << "\nend show all yaw\n";
-
-}
-
-
-struct PointsStamped {
-    std::vector<float> points;
-    ros::Time stamp;
-};
 
 typedef pcl::PointXYZ PointType;
 typedef pcl::PointCloud<PointType> Cloud;
@@ -556,360 +178,11 @@ typedef Cloud::Ptr CloudPtr;
 
 #include <fstream>
 
-//https://stackoverflow.com/questions/2602013/read-whole-ascii-file-into-c-stdstring
-bool loadFileToStr(const std::string &filename, std::string &data) {
-    std::ifstream t(filename.c_str());
 
-    if (!t.is_open()) {
-        return false;
-    }
-    std::stringstream buffer;
-    buffer << t.rdbuf();
-    data = buffer.str();
-    return true;
-}
 
-bool dumpStrToFile(const std::string &filename, const std::string &data) {
-    std::ofstream t(filename.c_str());
-    t << data;
 
-    return true;
 
-}
 
-
-struct MovementCheck {
-    float no_move_translation_epsilon = 5e-3;
-    float no_move_rotation_epsilon = 5e-3;
-    float final_no_move_translation_epsilon = 1e-2;
-    float final_no_move_rotation_epsilon = 1e-2;
-
-    float move_translation_epsilon = 0.1;
-    float move_rotation_epsilon = 0.05;
-
-    float no_move_check_ms = 200.0;
-    transform::Transform2d last_pose_inv;
-    transform::Transform2d last_move_pose_inv;
-
-    transform::Transform2d start_check_pose_inv;
-
-    transform::Transform2d movement;
-
-    common::Time last_time;
-
-    bool start_check = false;
-    bool still = false;
-    long move_flag = 0;
-    long move_flag_last = 0;
-    long update_flag = 0;
-
-    void reset(){
-
-        start_check = false;
-        still = false;
-
-        move_flag = 0;
-        move_flag_last = 0;
-        update_flag = 0;
-    }
-    // trigger at move or first frame
-    bool checkMoveTrigger(const transform::Transform2d &new_pose) {
-        movement = last_move_pose_inv * new_pose;
-
-        bool is_move = std::abs(movement.x()) > move_translation_epsilon
-                || std::abs(movement.y()) > move_translation_epsilon
-                || std::abs(movement.yaw()) > move_rotation_epsilon;
-
-        if(is_move|| (update_flag == 0)){
-            last_move_pose_inv = new_pose.inverse();
-            move_flag++;
-        }
-
-//        PLOGD << "movement " << movement << "\n move_flag " << move_flag << "\n move_flag_last " << move_flag_last << std::endl;
-
-        update_flag++;
-        return move_flag!=move_flag_last;
-
-    }
-    bool isMoveTriggered(){
-        return move_flag!=move_flag_last;
-    }
-    bool checkStill(const transform::Transform2d &new_pose) {
-
-        movement = last_pose_inv * new_pose;
-
-//        PLOGD << "new_pose:\n" << new_pose << std::endl;
-//        PLOGD << "movement:\n" << movement << std::endl;
-
-        bool no_move = std::abs(movement.x()) < no_move_translation_epsilon &&
-                       std::abs(movement.y()) < no_move_translation_epsilon
-                       && std::abs(movement.yaw()) < no_move_rotation_epsilon;
-
-        movement = start_check_pose_inv * new_pose;
-//        PLOGD << "movement:\n" << movement << std::endl;
-
-        no_move = no_move && std::abs(movement.x()) < final_no_move_translation_epsilon &&   std::abs(movement.y()) < final_no_move_translation_epsilon  && std::abs(movement.yaw()) < final_no_move_rotation_epsilon;
-
-        if ((no_move && !start_check) || !no_move) {
-            last_time = common::FromUnixNow();
-            start_check_pose_inv = new_pose.inverse();
-        }
-        last_pose_inv = new_pose.inverse();
-
-        start_check = no_move;
-        still = common::ToMillSeconds(common::FromUnixNow() - last_time) > no_move_check_ms;
-
-
-        return still;
-
-    }
-
-    bool isStill()  {
-//        still = common::ToMillSeconds(common::FromUnixNow() - last_time) > no_move_check_ms;
-
-        return still;
-    }
-
-    float getStillTime(){
-        return common::ToMillSeconds(common::FromUnixNow() - last_time);
-    }
-
-
-};
-
-
-namespace pcl{
-    /*
-             pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-        pcl::search::KdTree<pcl::PointXYZ> kdtree_2;
-        pcl::octree::OctreePointCloudSearch<pcl::PointXYZ> octree (resolution);
-
-     */
-
-    template<typename PointT>
-    void createTree(typename pcl::PointCloud<PointT>::ConstPtr t_input_cloud, pcl::KdTreeFLANN<PointT>& t_tree){
-        t_tree.setInputCloud(t_input_cloud);
-    }
-
-    template<typename PointT>
-    void createTree(typename pcl::PointCloud<PointT>::ConstPtr t_input_cloud, pcl::search::KdTree<PointT>& t_tree){
-        t_tree.setInputCloud(t_input_cloud);
-    }
-
-    template<typename PointT>
-    void createTree(typename pcl::PointCloud<PointT>::ConstPtr t_input_cloud, pcl::octree::OctreePointCloudSearch<PointT>& t_tree){
-        t_tree.setInputCloud(t_input_cloud);
-        t_tree.addPointsFromInputCloud ();
-    }
-
-
-    template<typename PointT, typename TreeType>
-    class Normal2dEstimation{
-
-    public:
-        using PointCloud = pcl::PointCloud<PointT>;
-        using PointCloudPtr = typename PointCloud::Ptr;
-        using PointCloudConstPtr = typename PointCloud::ConstPtr;
-        using Scalar = float;
-
-    private:
-        const TreeType& m_tree;
-        float m_query_radius = 0.1;
-        PointCloudConstPtr m_input_cloud;
-
-        std::vector<int> m_query_indices;
-        std::vector<float> m_query_distance;
-
-    public:
-        Normal2dEstimation(const TreeType& t_tree, float radius = 0.1, int num = 20):
-                m_tree(t_tree),
-                m_query_radius(radius),
-                m_query_indices(num),
-                m_query_distance(num){
-
-        }
-
-        inline void
-        setInputCloud(const PointCloudConstPtr& t_input_cloud)
-        {
-            m_input_cloud = t_input_cloud;
-        }
-        void setRadius(){
-
-        }
-        void setTree(){
-
-        }
-        void setInputCloud(){
-
-        }
-
-        void compute( const pcl::PointCloud<pcl::PointNormal>::Ptr&  output, float viewpoint_x, float viewpoint_y){
-
-            int input_point_num = m_input_cloud->points.size();
-            output->points.resize(input_point_num,pcl::PointNormal(0.0,0.0,0.0,0.0,0.0,0.0));
-            output->height = m_input_cloud->height;
-            output->width = m_input_cloud->width;
-            output->is_dense = true;
-
-            int rt = 0;
-            Eigen::Matrix<Scalar, 1, 5, Eigen::RowMajor> accu = Eigen::Matrix<Scalar, 1, 5, Eigen::RowMajor>::Zero ();
-            Eigen::Matrix<Scalar, 2, 1> K(0.0, 0.0);
-            Eigen::Matrix<Scalar, 4, 1> centroid;
-            Eigen::Matrix<Scalar, 2, 2> covariance_matrix;
-            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> eig_solver(2);
-
-            for(int i = 0 ; i < input_point_num;i++){
-
-
-                auto& query_point = m_input_cloud->at(i);
-                rt = m_tree.radiusSearch (query_point, m_query_radius, m_query_indices, m_query_distance);
-
-                std::size_t point_count;
-                point_count = m_query_indices.size ();
-                if(point_count <=3){
-                    output->points[i].normal_x  = output->points[i].normal_y  = output->points[i].normal_z  = output->points[i].curvature = std::numeric_limits<float>::quiet_NaN ();
-                    continue;
-                }
-
-
-                K.x() = m_input_cloud->at(m_query_indices[0]).x;
-                K.y() = m_input_cloud->at(m_query_indices[0]).y;
-
-
-                for (const auto &index : m_query_indices)
-                {
-                    Scalar x = m_input_cloud->at(index).x - K.x(), y = m_input_cloud->at(index).y - K.y();
-                    accu [0] += x * x;
-                    accu [1] += x * y;
-                    accu [2] += y * y;
-                    accu [3] += x;
-                    accu [4] += y;
-                }
-
-
-                {
-                    accu /= static_cast<Scalar> (point_count);
-                    centroid[0] = accu[3] + K.x(); centroid[1] = accu[4] + K.y(); centroid[2] = 0.0;
-                    centroid[3] = 1;
-                    covariance_matrix.coeffRef (0) = accu [0] - accu [3] * accu [3];//xx
-                    covariance_matrix.coeffRef (1) = accu [1] - accu [3] * accu [4];//xy
-                    covariance_matrix.coeffRef (3) = accu [2] - accu [4] * accu [4];//yy
-                    covariance_matrix.coeffRef (2) = covariance_matrix.coeff (1);//yx
-
-
-
-                    eig_solver.compute(covariance_matrix);
-#if 0
-                    {
-                        Eigen::MatrixX2f m(m_query_indices.size(),2);
-                        int index = 0;
-                        for(int j :  m_query_indices){
-                            m(index,0) = m_input_cloud->at(j).x ;
-                            m(index,1) = m_input_cloud->at(j).y ;
-                            index++;
-                        }
-
-                        Eigen::VectorXf mean_vector = m.colwise().mean();
-
-                        Eigen::MatrixXf centered = m.rowwise() - mean_vector.transpose();
-
-                        Eigen::MatrixXf cov = (centered.adjoint() * centered) / ( m.rows() - 1 ) ;
-                        eig_solver.compute(cov);
-
-                    }
-#endif
-
-
-
-
-
-
-                    auto& eigen_values = eig_solver.eigenvalues();
-                    auto& eigen_vectors = eig_solver.eigenvectors() ;
-                    auto& nx =  output->points[i].normal_x;
-                    auto& ny =  output->points[i].normal_y;
-                    auto& nz =  output->points[i].normal_z;
-                    auto& c =  output->points[i].curvature;
-
-                    nx = eigen_vectors(0,0);
-                    ny = eigen_vectors(1,0);
-#if 0
-                    if(std::abs(eigen_values(0)) < std::abs(eigen_values(1))){
-                        nx = eigen_vectors(0,0);
-                        ny = eigen_vectors(1,0);
-                    }else{
-                        nx = eigen_vectors(0,1);
-                        ny = eigen_vectors(1,1);
-                    }
-#endif
-                    nz = 0.0;
-
-                    Eigen::Matrix <float, 2, 1> normal (nx, ny);
-                    Eigen::Matrix <float, 2, 1> vp (viewpoint_x - query_point.x, viewpoint_y - query_point.y);
-
-                    // Dot product between the (viewpoint - point) and the plane normal
-                    float cos_theta = vp.dot (normal);
-                    // Flip the plane normal
-                    if (cos_theta < 0)
-                    {
-                        nx *= -1;
-                        ny *= -1;
-                    }
-
-                    c = std:: acos(std::abs(cos_theta));
-
-//                    std::cout << __LINE__ << "eigenvalues:\n" << eigen_values << std::endl;
-//                    std::cout << __LINE__ << "eigenvectors:\n" << eigen_vectors << std::endl;
-                }
-
-
-            }
-
-        }
-
-    };
-}
-
-template <typename T>
-T normalise_angle(){
-
-}
-
-class MapOdomFilter{
-private:
-    int max_len = 5;
-    std::deque<transform::Transform2d> buffer;
-
-public:
-    MapOdomFilter(int t_max_len = 5):max_len(t_max_len){ }
-    void setLen(int t_max_len){
-        max_len = t_max_len;
-    }
-    transform::Transform2d add(const transform::Transform2d& t_pose){
-        if(buffer.size() > max_len){
-            buffer.pop_back();
-        }
-        buffer.emplace_front(t_pose);
-
-        float x = 0.0, y = 0.0 ,yaw = 0.0;
-        transform::Transform2d relative_pose , first_pose_inv = t_pose.inverse();
-        for(int i = 1 ; i < buffer.size();i++){
-            relative_pose = first_pose_inv*buffer[i];
-
-            x += relative_pose.x();
-            y += relative_pose.y();
-            yaw += relative_pose.yaw();
-        }
-        x /= buffer.size();
-        y /= buffer.size();
-        yaw /= buffer.size();
-
-        relative_pose.set(x,y,yaw);
-
-        return relative_pose;
-    }
-};
 
 
 /*
@@ -1108,17 +381,14 @@ private:
     // Init object (second point type is for the normals, even if unused)
     pcl::MovingLeastSquares<pcl::PointNormal, pcl::PointNormal> m_mls;
 
-    pcl::octree::OctreePointCloudSearch<pcl::PointNormal> m_octree_reading ;
-    pcl::octree::OctreePointCloudSearch<pcl::PointNormal> m_octree_reference ;
-    pcl::Normal2dEstimation<pcl::PointNormal, pcl::octree::OctreePointCloudSearch<pcl::PointNormal>> m_norm_est_reading;
-    pcl::Normal2dEstimation<pcl::PointNormal, pcl::octree::OctreePointCloudSearch<pcl::PointNormal>> m_norm_est_reference;
+    pcl::search::KdTree<pcl::PointXYZ> m_kdtree_reading ;
+    perception::PointcloudNormal2dEstimation<pcl::PointXYZ, pcl::search::KdTree<pcl::PointXYZ>> m_norm_est_reading;
 
 
     Normal2dEstimation m_norm_estim;
 
-    MovementCheck m_movement_check;
 
-    MapOdomFilter map_odom_filter;
+    transform::PoseFilter map_odom_filter;
 
 public:
     PointCloudPoseSolver() : cloud_reference(new pcl::PointCloud<pcl::PointNormal>),
@@ -1140,8 +410,7 @@ public:
                              m_pl_te(
                                      new ICPTYPE) ,
                              m_pl_te_weights(1000),
-                             m_octree_reading(0.05),
-                             m_octree_reference(0.05),m_norm_est_reading(m_octree_reading),m_norm_est_reference(m_octree_reference){
+                             m_kdtree_reading(),m_norm_est_reading(m_kdtree_reading){
 
 
         config();
@@ -1178,6 +447,8 @@ public:
         m_norm_estim.setSearchMethod(m_norm_tree);
         m_norm_estim.setRadiusSearch(m_norm_est_config.radius);
 
+        m_norm_est_reading.setQueryRadius(m_norm_est_config.radius);
+
         m_pl_te->setWarpFunction(m_warp_fcn_pl);
 
 
@@ -1198,13 +469,6 @@ public:
 #endif
 
         m_joint_pl_icp.setTransformationEstimation(m_pl_te);
-
-        m_movement_check.no_move_check_ms = m_move_check_config.no_move_check_ms;
-        m_movement_check.no_move_translation_epsilon = m_move_check_config.no_move_translation_epsilon;
-        m_movement_check.no_move_rotation_epsilon = m_move_check_config.no_move_rotation_epsilon;
-        m_movement_check.final_no_move_translation_epsilon = m_move_check_config.final_no_move_translation_epsilon;
-        m_movement_check.final_no_move_rotation_epsilon = m_move_check_config.final_no_move_rotation_epsilon;
-
 
         m_mls.setComputeNormals (true);
 
@@ -1475,9 +739,15 @@ public:
                      const pcl::PointXYZ &view_point = pcl::PointXYZ(0.0, 0.0, 0.0)) {
 
         pcl::copyPointCloud(*t_cloud, *t_cloud_norm);
+#if 0
         m_norm_estim.setInputCloud(t_cloud);
         m_norm_estim.compute(t_cloud_norm);
         m_norm_estim.setViewPoint(view_point);
+#endif
+#if 1
+        m_norm_est_reading.setInputCloud(t_cloud);
+        m_norm_est_reading.compute(t_cloud_norm);
+#endif
     }
 
     void removeReadingShadow(pcl::PointCloud<pcl::PointNormal>::Ptr t_cloud,
@@ -1495,56 +765,6 @@ public:
 
     }
 
-    void matchUpdate(const transform::Transform2d &odom_pose) {
-
-
-//        std::cout << "check time: " << m_movement_check.getStillTime() << "\n";
-
-        bool update = m_movement_check.checkStill(odom_pose) ;
-//        std::cout << __FILE__ << ":" << __LINE__ << " , update : " << update << ", size : " << cloud_reference->size()   << "\n";
-
-
-        if ((update ) || cloud_reference->size() == 0) {
-
-//            std::cout << __FILE__ << ":" << __LINE__ << " call updateReference \n";
-
-            updateReference(cloud_align);
-
-        }
-
-    }
-
-    void match() {
-
-        if (!cloud_reference->empty()) {
-            if (!m_movement_check.isStill()) {
-//                std::cout << " perform icp\n";
-                float score = icp_match(cloud_reading_filtered_norm, cloud_reference, cloud_align,
-                                        sensor_absolute_pose);
-            } else {
-//                std::cout << " bypass icp\n";
-
-                Eigen::Matrix4f initial_guess(Eigen::Matrix4f::Identity ());
-                initial_guess(0, 0) = sensor_absolute_pose.matrix[0][0];
-                initial_guess(0, 1) = sensor_absolute_pose.matrix[0][1];
-                initial_guess(1, 0) = sensor_absolute_pose.matrix[1][0];
-                initial_guess(1, 1) = sensor_absolute_pose.matrix[1][1];
-                initial_guess(0, 3) = sensor_absolute_pose.matrix[0][2];
-                initial_guess(1, 3) = sensor_absolute_pose.matrix[1][2];
-                pcl::transformPointCloud(*cloud_reading_filtered_norm, *cloud_align, initial_guess);
-
-            }
-
-        } else {
-            (*cloud_reference) += (*cloud_reading_filtered_norm);
-
-        }
-
-        robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
-        robot_absolute_pose = origin * robot_relative_pose;
-
-
-    }
 
     bool isIcpInit() const{
         return is_icp_init;
@@ -1669,7 +889,6 @@ public:
         }
 
 
-//        if(m_movement_check.getStillTime() < 100.0 )
         {
 
             robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
@@ -1721,7 +940,7 @@ public:
         }
 
         std::string raw_data;
-        loadFileToStr(path_pose,raw_data);
+        common::loadFileToStr(path_pose,raw_data);
         nlohmann::json json_data = nlohmann::json::parse(raw_data);
 
 
@@ -1776,7 +995,7 @@ public:
         nlohmann::json json_data;
         serialization::to_json(json_data,"origin",origin);
 
-        dumpStrToFile(path_pose,json_data.dump() );
+        common::dumpStrToFile(path_pose,json_data.dump() );
 
         pcl::io::savePCDFileASCII(path_pcd.c_str(), *cloud_reference);
         std::cerr << "Saved " << cloud_reference->size() << " data points to " << path_pcd.c_str() << std::endl;
@@ -1890,24 +1109,20 @@ public:
     const transform::Transform2d &solveMapOdom(const transform::Transform2d &t_odom_base) {
 
 
-
-#if 0
-        bool update = m_movement_check.checkStill(t_odom_base) ;
-        std::cout << "solveMapOdom m_movement_check " << m_movement_check.isStill() << ", " << m_movement_check.getStillTime() <<  "\n";
-        if(m_movement_check.isStill()){
-
-            return map_odom_pose;
-        }
-#endif
 //        robot_relative_pose = sensor_absolute_pose * sensor_relative_pose.inverse();
         robot_absolute_pose = origin * robot_relative_pose;
         map_odom_pose = robot_absolute_pose * t_odom_base.inverse();
 
 
-#if 0
+#if 1
         map_odom_pose = map_odom_filter.add(map_odom_pose);
 #endif
         return map_odom_pose;
+    }
+
+    const  transform::Transform2d & getMapOdomTf(){
+        return map_odom_pose;
+
     }
 
 };
@@ -1947,130 +1162,7 @@ method
 
  */
 
-class RangesFilter{
 
-public:
-    void add(const std::vector<float>& ranges){
-
-
-        int point_num = ranges.size();
-        if(!is_init){
-            matrix_buffer = Eigen::MatrixXf(max_len,point_num);
-//            ranges_buffer.resize(max_len, ranges);
-            is_init = true;
-        }
-        if(update_index >=max_len){
-            return;
-        }
-
-        for(int i = 0 ; i < point_num;i++){
-            matrix_buffer(update_index,i) = ranges[i];
-        }
-//        ranges_buffer[update_index] = ranges;
-
-        update_index++;
-
-    }
-    bool filter(){
-        if(update_index < max_len){
-            return false;
-        }
-        Eigen::VectorXf mean_vector = matrix_buffer.colwise().mean();
-
-        Eigen::MatrixXf centered = matrix_buffer.rowwise() - mean_vector.transpose();
-
-
-
-//        Eigen::Array<double, 1, Eigen::Dynamic> std_dev = (centered.square().colwise().sum()/(M-1)).sqrt();
-
-        auto std_dev = centered.array().pow(2).colwise().sum() /(max_len -1);
-
-
-        int point_num = std_dev.cols();
-
-//        PLOGD << "std_dev " << std_dev << std::endl;
-
-        ranges_filtered.resize(point_num);
-        for(int i = 0 ; i <point_num;i++){
-
-            ranges_filtered[i] = std_dev(0,i) < max_stddev ? mean_vector(i):100.0;
-        }
-        return true;
-
-    }
-    const std::vector<float>& getFiltered(){
-
-        return ranges_filtered;
-    }
-    void clear(){
-        update_index = 0;
-    }
-
-public:
-    int max_len = 10;
-    float max_stddev = 0.01;
-    int update_index = 0;
-
-private:
-    bool is_init = false;
-    std::vector<std::vector<float>> ranges_buffer;
-    std::vector<float> ranges_filtered;
-    std::vector<float> ranges_stddev;
-
-    Eigen::MatrixXf matrix_buffer;
-
-};
-
-
-struct MissionManager{
-    int run_command = 0;
-    int start_run = 0;
-    std::function<void()> start_command_callback;
-    std::function<void()> stop_command_callback;
-    std::function<void()> start_run_callback;
-    std::function<void()> stop_run_callback;
-
-    void command(int t_run){
-
-        if(t_run && ! run_command){
-            run_command = t_run;
-            start_run = 1;
-            if(start_command_callback){
-                start_command_callback();
-            }
-        }
-
-        if(!t_run && run_command){
-            run_command = t_run;
-            start_run = 0;
-            if(stop_command_callback){
-                stop_command_callback();
-            }
-        }
-
-    }
-    int isStartTrigger(){
-        return start_run;
-    }
-    int isCommandTrigger(){
-        return run_command;
-    }
-    void respond(int t_result){
-        if(t_result && ! start_run){
-            start_run = t_result;
-            if(start_run_callback){
-                start_run_callback();
-            }
-        }
-
-        if(!t_result && start_run){
-            start_run = t_result;
-            if(stop_run_callback){
-                stop_run_callback();
-            }
-        }
-    }
-};
 
 int main(int argc, char **argv) {
 
@@ -2079,7 +1171,7 @@ int main(int argc, char **argv) {
     plog::init(plog::debug, &fileAppender).addAppender(&consoleAppender); // Initialize the logger with the both appenders.
 
 
-    std::vector<PointsStamped> laser_points_cache;
+
 
     //==== ros
     ros::init(argc, argv, "scan_matching");
@@ -2347,9 +1439,9 @@ int main(int argc, char **argv) {
     cloud_reference.header.frame_id = "map";
     cloud_matched.header.frame_id = "map";
 
-    createPointCloud2(cloud_filtered, {"x", "y", "z"});
-    createPointCloud2(cloud_reference, {"x", "y", "z"});
-    createPointCloud2(cloud_matched, {"x", "y", "z"});
+    sensor::createPointCloud2(cloud_filtered, {"x", "y", "z"});
+    sensor::createPointCloud2(cloud_reference, {"x", "y", "z"});
+    sensor::createPointCloud2(cloud_matched, {"x", "y", "z"});
 
 
     //==== pcl cloud
@@ -2481,6 +1573,8 @@ int main(int argc, char **argv) {
     transform::Transform2d tf_odom_base;
     transform::Transform2d tf_map_base;
 
+    transform::Transform2d fuck_solved_pose;
+
 
     const char* amcl_tf_broadcast = "/amcl/tf_broadcast";
     const char* status_param = "status";
@@ -2500,18 +1594,21 @@ int main(int argc, char **argv) {
 
     bool is_origin_compute = false;
     transform::Transform2d interactive_origin;
-    ros_tool::InteractiveTf interactive_tf(map_frame, reference_frame);
+    std::cout << "ros::this_node::getNamespace() = " << ros::this_node::getNamespace() << std::endl;
+    std::cout << "ros::this_node::getName() = " << ros::this_node::getName() << std::endl;
+
+    ros_tool::RvizInteractiveControlTool interactive_tf(map_frame, reference_frame);
 
 
     ros::Time scan_time;
 
 
 
-    RangesFilter rangesFilter;
+    perception::RangesFilter rangesFilter;
     rangesFilter.max_len = scan_filter_len;
     rangesFilter.max_stddev = scan_filter_stddev;
 
-    MovementCheck movement_check;
+    transform::MovementCheck movement_check;
     bool new_scan_filtered = false;
 
 
@@ -2680,7 +1777,7 @@ int main(int argc, char **argv) {
             is_interactive_tf_change = true;
             is_map_update = true;
             float yaw;
-            to_yaw(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w, yaw);
+            math::to_yaw(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w, yaw);
             interactive_origin.set(pose.position.x, pose.position.y, yaw);
             solver.setOrigin(interactive_origin);
 
@@ -2715,12 +1812,12 @@ int main(int argc, char **argv) {
         if(!solver_cloud_reading->empty()  ){
 //            PLOGD << "cloud_norm_pub.publish(cloud_norm)"  << std::endl;
 
-            PclPointCloudToPointCloud2(solver_cloud_reading, cloud_filtered);
+            sensor::PclPointCloudToPointCloud2(solver_cloud_reading, cloud_filtered);
             cloud_filtered.header.stamp = scan_time;
             cloud_filtered.header.frame_id.assign(laser_frame);
             cloud_filtered_pub.publish(cloud_filtered);
 
-            PclPointCloudToPoseArray(solver_cloud_reading, cloud_norm);
+            sensor::PclPointCloudToPoseArray(solver_cloud_reading, cloud_norm);
             cloud_norm.header.stamp = scan_time;
             cloud_norm.header.frame_id.assign(laser_frame);
             cloud_norm_pub.publish(cloud_norm);
@@ -2734,7 +1831,7 @@ int main(int argc, char **argv) {
 
 //                PLOGD << "cloud_matched_pub.publish(cloud_matched)"  << std::endl;
 
-                PclPointCloudToPointCloud2(solver_cloud_matched, cloud_matched);
+                sensor::PclPointCloudToPointCloud2(solver_cloud_matched, cloud_matched);
                 cloud_matched.header.stamp = stamp;
                 cloud_matched.header.frame_id.assign(reference_frame);
                 cloud_matched_pub.publish(cloud_matched);
@@ -2746,7 +1843,7 @@ int main(int argc, char **argv) {
                 if(!solver_cloud_reference->empty()){
 //                    PLOGD << "cloud_reference_pub.publish(cloud_reference)"  << std::endl;
 
-                    PclPointCloudToPointCloud2(solver_cloud_reference, cloud_reference);
+                    sensor::PclPointCloudToPointCloud2(solver_cloud_reference, cloud_reference);
                     cloud_reference.header.stamp = stamp ;
                     cloud_reference.header.frame_id.assign(reference_frame);
                     cloud_reference_pub.publish(cloud_reference);
@@ -2771,7 +1868,7 @@ int main(int argc, char **argv) {
 
                 interactive_tf.setInitPose(map_cloud_origin_tf.x(), map_cloud_origin_tf.y(),
                                            map_cloud_origin_tf.yaw());
-                interactive_tf.start(1.0, false);
+                interactive_tf.start(ros::this_node::getName(),1.0, false);
             }
             robot_pose_array.poses.clear();
         }
@@ -2794,9 +1891,9 @@ int main(int argc, char **argv) {
                     robot_pose_array.poses.push_back(initialpose_msg.pose.pose);
                 } else {
                     float yaw, yaw_last;
-                    to_yaw(robot_pose_array.poses.back().orientation.x, robot_pose_array.poses.back().orientation.y,
+                    math::to_yaw(robot_pose_array.poses.back().orientation.x, robot_pose_array.poses.back().orientation.y,
                            robot_pose_array.poses.back().orientation.z, robot_pose_array.poses.back().orientation.w, yaw_last);
-                    to_yaw(initialpose_msg.pose.pose.orientation.x, initialpose_msg.pose.pose.orientation.y,
+                    math::to_yaw(initialpose_msg.pose.pose.orientation.x, initialpose_msg.pose.pose.orientation.y,
                            initialpose_msg.pose.pose.orientation.z, initialpose_msg.pose.pose.orientation.w, yaw);
 
                     if (std::abs(initialpose_msg.pose.pose.position.x - robot_pose_array.poses.back().position.x) > 0.03
@@ -2835,32 +1932,11 @@ int main(int argc, char **argv) {
 #endif
 
     common::Suspend suspend;
-    MissionManager missionManager;
-
-    missionManager.start_command_callback = [&]{
-        start_run = 1;
-        missionManager.respond(start_run);
-        start_run = load_solver_map();
-        missionManager.respond(start_run);
-    };
-    missionManager.stop_command_callback = [&]{
-        nh.setParam(amcl_tf_broadcast, true);
-        nh_private.setParam(status_param,0);
-    };
-
-    missionManager.start_run_callback = [&]{
-        nh_private.setParam(status_param,1);
-    };
-    missionManager.stop_run_callback = [&]{
-        nh_private.setParam(status_param,-1);
-    };
-
 
     while (ros::ok()) {
 
         nh_private.getParam(run_param,run_command);
 
-#if 1
         if(run_command == 0){
             run_command_last = run_command;
             nh.setParam(amcl_tf_broadcast, true);
@@ -2878,18 +1954,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
-#endif
 
-
-#if 0
-        missionManager.command(run_command);
-
-        if(missionManager.isCommandTrigger() == 0 || missionManager.isStartTrigger() == 0){
-            suspend.sleep(2000.0);
-            continue;
-        }
-
-#endif
 
         ros::spinOnce();
         scan_task_manager.call();
@@ -2941,7 +2006,7 @@ int main(int argc, char **argv) {
 
             common::Time t1 = common::FromUnixNow();
 
-            LaserScanToPclPointCloud(scan_handler.local_xy_points, scan_handler.range_valid_num, pcl_cloud_raw);
+            sensor::LaserScanToPclPointCloud(scan_handler.local_xy_points, scan_handler.range_valid_num, pcl_cloud_raw);
 
 
             solver.addSensorReading(pcl_cloud_raw);
@@ -3024,7 +2089,7 @@ int main(int argc, char **argv) {
 
             }
 
-            if(std::strcmp(mode.c_str(), MODE_LOC) ==0){
+            if((std::strcmp(mode.c_str(), MODE_LOC) ==0) &&  solver.isIcpInit()){
                 solver.match_v2();
 
                 start_pub_tf =  !solver.isIcpFault() && solver.isIcpWorking();
@@ -3051,6 +2116,7 @@ int main(int argc, char **argv) {
                     }
 
                     auto &map_odom_tf = solver.solveMapOdom(tf_odom_base);
+
 
                     temp_transform.setOrigin(tf::Vector3(map_odom_tf.x(), map_odom_tf.y(), 0.0));
                     temp_q.setRPY(0, 0, map_odom_tf.yaw());
@@ -3082,7 +2148,6 @@ int main(int argc, char **argv) {
 
 
                 }else{
-                    PLOGD << "stop pub_map_odom_tf "<<std::endl;
 
                     nh.setParam(amcl_tf_broadcast, true);
                     nh_private.setParam(status_param,-1);
@@ -3118,6 +2183,10 @@ int main(int argc, char **argv) {
 //                    PLOGD << "icp origin_pose : " << origin_pose << std::endl;
 //                    PLOGD << "icp relative_pose : " << relative_pose << std::endl;
 
+
+
+
+
                     initialpose_msg.pose.pose.position.x = solved_pose.x();
                     initialpose_msg.pose.pose.position.y = solved_pose.y();
 
@@ -3148,6 +2217,24 @@ int main(int argc, char **argv) {
                     pub_map_odom_tf.stamp_ =pub_stamp;
 //                    PLOGD << "2 pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
                     tf_br.sendTransform(pub_map_odom_tf);
+                }
+
+                if(get_odom_base_tf && 0){
+                    auto& map_odom_tf = solver.getMapOdomTf();
+
+                    auto solved_pose = map_odom_tf * tf_odom_base;
+
+
+                    initialpose_msg.pose.pose.position.x = solved_pose.x();
+                    initialpose_msg.pose.pose.position.y = solved_pose.y();
+
+                    tf::quaternionTFToMsg(tf::createQuaternionFromYaw(solved_pose.yaw()),
+                                          initialpose_msg.pose.pose.orientation);
+                    initialpose_msg.header.stamp = ros::Time::now();
+
+//                    PLOGD<<"publish initialpose_msg: " << solved_pose << std::endl;
+
+                    icp_pose_pub.publish(initialpose_msg);
                 }
             }
 

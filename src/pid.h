@@ -40,6 +40,8 @@ class PID
 
         double calculate( double setpoint, double pv, double dt );
 
+        void reset();
+
     ~PID();
 
     private:

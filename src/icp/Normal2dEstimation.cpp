@@ -557,7 +557,7 @@ void Normal2dEstimation::flipNormalTowardsViewpoint (const Point &point, float& 
         y *= -1;
         z *= -1;
     }
-    c = std::abs(cos_theta);
+    c = std:: acos(std::abs(cos_theta));
 }
 
 

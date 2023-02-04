@@ -21,6 +21,14 @@ namespace geometry{
         }
     };
 
+    struct DetectTarget{
+        // x,y
+        float pose_in_laser[2];
+        float pose_in_base[2];
+
+        float match_error;
+    };
+
 }
 
 #endif //SCAN_REPUBLISHER_GEOMETRY_TYPES_H

@@ -8,8 +8,11 @@
 #include <vector>
 #include <array>
 #include <cmath>
-#include "../transform/transform.h"
-#include "../functional/generator.h"
+#include "transform/transform.h"
+#include "functional/generator.h"
+#include "math/math_basic.h"
+
+
 namespace sensor{
     struct ScanToPoints{
 
@@ -71,6 +74,9 @@ namespace sensor{
 
 
                 FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                for(auto&b:angle_buffer){
+                    b = angle_normalise_zero(b);
+                }
                 cos_angle_buffer.resize(N);
                 sin_angle_buffer.resize(N);
                 local_xy_points.resize(N+N);
@@ -134,6 +140,9 @@ namespace sensor{
 
 
                 FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                for(auto&b:angle_buffer){
+                    b = angle_normalise_zero(b);
+                }
                 cos_angle_buffer.resize(N);
                 sin_angle_buffer.resize(N);
                 intensities_vec.resize(N);
@@ -234,6 +243,9 @@ namespace sensor{
 
 
                 FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                for(auto&b:angle_buffer){
+                    b = angle_normalise_zero(b);
+                }
                 cos_angle_buffer.resize(N);
                 sin_angle_buffer.resize(N);
                 local_xy_points.resize(N+N);
@@ -332,6 +344,10 @@ namespace sensor{
 
 
                 FP::lin_space(angle_min,angle_increment,N,angle_buffer);
+                for(auto&b:angle_buffer){
+                    b = angle_normalise_zero(b);
+                }
+
                 cos_angle_buffer.resize(N);
                 sin_angle_buffer.resize(N);
                 local_xy_points.resize(N+N);
@@ -368,7 +384,7 @@ namespace sensor{
 //                std::cout << "\n***********check range_valid_num\n";
                 for(int i = offset ; i < N-offset;i++){
                     ranges_valid_index[range_valid_num] = i;
-//                    std::cout << ranges_[i] << ", ";
+//                    std::cout << ranges_[i] << ", " << angle_buffer[i]  << " | ";
                     valid = std::isnormal(ranges_[i])  &&(ranges_[i] < range_max) && (ranges_[i] > range_min)
                             &&  (angle_buffer[i] > filter_angle_min) &&  (angle_buffer[i] < filter_angle_max)
                             && (  (std::abs(ranges_[i]-ranges_[i-1]) < scan_max_jump)|| (std::abs(ranges_[i]-ranges_[i+1]) < scan_max_jump) )

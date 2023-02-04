@@ -79,7 +79,7 @@ namespace serialization{
             // get the property
             auto& property = std::get<i>(properties);
             // you can also replace `asAny` by `fromJson` to recursively serialize
-            using Type = typename std::remove_reference<decltype(object.*(property.member))>::type;
+//            using Type = typename std::remove_reference<decltype(object.*(property.member))>::type;
             rt = rt && from_json(data[name],property.name,object.*(property.member));
         });
         return rt;

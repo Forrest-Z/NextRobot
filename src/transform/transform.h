@@ -11,6 +11,7 @@
 
 namespace transform{
     struct Transform2d{
+
         std::array<std::array<float,3>,3> matrix;
         Transform2d(float x=0.0, float y=0.0,float yaw=0.0){
             set(x,y,yaw);
@@ -47,13 +48,14 @@ namespace transform{
         }
 
 
-        Transform2d operator*(const Transform2d& rhv){
+        Transform2d mul(const Transform2d& rhv)const {
             Transform2d result;
 
             auto& a = this->matrix;
             auto& b = rhv.matrix;
             auto& c = result.matrix;
             // Calculate the j-th column of the result in-place (in B) using the helper array
+
             for(int i=0 ; i<3 ; i++)
             {
                 for(int j=0 ; j<3 ; j++)
@@ -65,6 +67,33 @@ namespace transform{
                         c[i][j]+=a[i][k]*b[k][j];
                         //--^-- should be k
                     }
+
+                }
+            }
+            return result;
+
+        }
+
+        Transform2d operator*(const Transform2d& rhv)const{
+            Transform2d result;
+
+            auto& a = this->matrix;
+            auto& b = rhv.matrix;
+            auto& c = result.matrix;
+            // Calculate the j-th column of the result in-place (in B) using the helper array
+
+            for(int i=0 ; i<3 ; i++)
+            {
+                for(int j=0 ; j<3 ; j++)
+                {
+
+                    c[i][j]=0;
+                    for(int k=0 ; k<3 ; k++)
+                    {
+                        c[i][j]+=a[i][k]*b[k][j];
+                        //--^-- should be k
+                    }
+
                 }
             }
             return result;
@@ -115,7 +144,7 @@ namespace transform{
             }
 
         }
-        void mul(const std::vector<float>& points, int n_dim, std::vector<float>& result){
+        void mul(const std::vector<float>& points, size_t n_dim, std::vector<float>& result){
 
             /*
          r00 r01 r02 tx     x0        x1
@@ -150,7 +179,7 @@ namespace transform{
 //            std::cout << "tf, r00 = " << r00 << ", r01 = " << r01 << ", r10 = " << r10  << ", r11 = " << r11 << std::endl;
 
 
-            for (int i = 0; i < n_dim; i++) {
+            for (size_t i = 0; i < n_dim; i++) {
                 p_x[i + i] = r00 * p_data_x[i+i] + r01 * p_data_x[i+i+1] + tx;
                 p_x[i + i + 1] = r10 * p_data_x[i+i] + r11 * p_data_x[i+i+1] + ty;
 //                std::cout << "== i = " << i << std::endl;
@@ -199,19 +228,6 @@ namespace transform{
 
         }
 
-        Transform2d operator*(const Transform2d& rhv )const{
-            Transform2d transform;
-            auto & mat  =this->matrix;
-            auto & mat_rhv  =rhv.matrix;
-            auto & mat_mul  =transform.matrix;
-            for(int i = 0; i < 3; i++){
-                for(int j = 0; j < 3; j++)
-                    mat_mul[i][j] += mat[i][j] * mat_rhv[j][i] ;
-            }
-
-            return transform;
-
-        }
         Transform2d inverse() const{
             Transform2d transform_inv;
             float determinant = 0;

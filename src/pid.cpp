@@ -36,6 +36,7 @@ class PIDImpl
         ~PIDImpl();
         double calculate( double setpoint, double pv );
         double calculate( double setpoint, double pv,double dt );
+        void reset();
 
     private:
         double _dt;
@@ -63,6 +64,10 @@ double PID::calculate( double setpoint, double pv, double dt )
     return pimpl->calculate(setpoint,pv,dt);
 }
 
+void PID::reset(){
+    pimpl->reset();
+
+}
 PID::~PID() 
 {
     delete pimpl;
@@ -145,6 +150,12 @@ double PIDImpl::calculate( double setpoint, double pv, double dt)
     _pre_error = error;
 
     return output;
+}
+
+void PIDImpl::reset()
+{
+    _pre_error = 0.0;
+    _integral = 0.0;
 }
 
 PIDImpl::~PIDImpl()

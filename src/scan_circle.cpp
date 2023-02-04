@@ -529,6 +529,19 @@ void FindShelfLeg(){}
  3. 2 legs of a shelf
  */
 
+
+
+/*
+
+ compute control points array, not direct rotation and forward cmd_vel
+ two stage controller
+ 1.
+
+ */
+struct MotionControl{
+
+};
+
 int main(int argc, char** argv){
 
 
