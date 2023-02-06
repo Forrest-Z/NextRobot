@@ -1,7 +1,8 @@
 //
 // Created by waxz on 23-1-4.
 //
-
+#define SOL_CHECK_ARGUMENTS 1
+#include <sol.hpp>
 #include <fstream>
 
 
@@ -25,6 +26,7 @@
 #include "sensor_msgs/LaserScan.h"
 #include "xmlrpcpp/XmlRpc.h"
 
+#include <matplot/matplot.h>
 
 
 #include "nlohmann/json.hpp"
@@ -75,6 +77,227 @@ circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<geometry::Point>&
     }
     return r;
 }
+
+/*
+
+ robot pose define in final target frame
+
+
+                      |
+                      |
+                      |
+                      |
+              --------|t0
+
+                      .t1
+
+                      .t2
+
+
+                _|r
+
+
+
+
+  control parameter: curve_1, dist_1, cure_2, dist_2
+  input: current_pose, current_vel, target_pose
+
+ 1. given current_vel, compute curve limit,
+ 2. constrains:
+
+
+
+
+
+
+ */
+
+
+/*
+ update pose use curve and dist
+
+ curve >0 : turn left
+ curve <0 : turn right
+ curve =0 : forward
+
+ radius = 1.0/curve
+ angle = dist/radius = dist*curve
+
+
+ rotate_center_relative : transform(0.0, - radius, 0.0)
+ rotate_center_absolute:  init_pose * rotate_center_relative
+ next_pose_relative: transform(radius*cos(angle), radius*sin(angle), angle)
+ next_pose_absolute : rotate_center_absolute*next_pose_relative
+
+  */
+
+namespace transform{
+    template<typename FloatType>
+    struct MatrixSE2{
+        std::array<std::array<FloatType,3>,3> matrix;
+        MatrixSE2(FloatType x = 0.0, FloatType y = 0.0, FloatType yaw = 0.0){
+            set(x,y,yaw);
+        }
+
+        MatrixSE2(const Transform2d& rhv){
+            set(rhv.x(),rhv.y(),rhv.yaw());
+        }
+
+        FloatType x() const {
+            return matrix[0][2];
+        }
+        FloatType y() const {
+            return matrix[1][2];
+        }
+        FloatType yaw() const {
+            return atan2(matrix[1][0],matrix[0][0]);
+        }
+        void set(FloatType x, FloatType y, FloatType yaw){
+            matrix[0][0] = cos(yaw);
+            matrix[0][1]  = -sin(yaw);
+            matrix[1][0] = sin(yaw);
+            matrix[1][1]  = cos(yaw);
+
+            matrix[0][2]  = x;
+            matrix[1][2]  = y;
+
+            matrix[2][0]  = 0.0;
+            matrix[2][1]  = 0.0;
+            matrix[2][2]  = 1.0;
+        }
+
+        MatrixSE2<FloatType> operator*(const MatrixSE2<FloatType>& rhv)const{
+            MatrixSE2<FloatType> result;
+
+            auto& a = this->matrix;
+            auto& b = rhv.matrix;
+            auto& c = result.matrix;
+            // Calculate the j-th column of the result in-place (in B) using the helper array
+
+//            std::cout << "check matrix mul:\n";
+            for(int i=0 ; i<3 ; i++)
+            {
+                for(int j=0 ; j<3 ; j++)
+                {
+
+                    c[i][j]=0;
+                    for(int k=0 ; k<3 ; k++)
+                    {
+//                        std::cout <<" [ " <<  a[i][k] << " * " << b[k][j] << " ] " ;
+                        c[i][j]+=a[i][k]*b[k][j];
+                        //--^-- should be k
+                    }
+//                    std::cout << " = " << c[i][j] << "\n";
+
+                }
+            }
+            return result;
+        }
+    };
+}
+
+transform::Transform2d updateCurveDIst(const transform::Transform2d& init_pose, float curve, float dist){
+    transform::Transform2d result_pose;
+
+    if(std::abs(curve) < 1e-4){
+
+        result_pose.set(dist, 0.0,0.0);
+        result_pose = init_pose *result_pose;
+    }else{
+        float radius = 1.0/curve;
+        float angle = dist* curve;
+
+        transform::Transform2d rotate_center_relative(0.0, radius, 0.0);
+        transform::Transform2d rotate_center_absolute = init_pose*rotate_center_relative;
+        float angle_relative = (curve>0.0) ? (angle - M_PI_2) : ( M_PI_2 + angle);
+
+        float abs_radius = std::abs(radius);
+        transform::Transform2d result_pose_relative(abs_radius*std::cos(angle_relative), abs_radius*std::sin(angle_relative), angle);
+
+        result_pose = rotate_center_absolute * result_pose_relative;
+    }
+    return result_pose;
+}
+
+
+template<typename FloatType>
+transform::MatrixSE2<FloatType> updateCurveDistDiff(const transform::MatrixSE2<FloatType>& init_pose, FloatType curve, FloatType dist){
+    transform::MatrixSE2<FloatType> result_pose;
+
+    {
+        FloatType radius = 1.0/(curve);
+        FloatType angle = dist* curve;
+
+        transform::MatrixSE2<FloatType> rotate_center_relative(0.0, radius, 0.0);
+        transform::MatrixSE2<FloatType> rotate_center_absolute = init_pose*rotate_center_relative;
+        FloatType angle_relative = (curve>0.0) ? (angle - M_PI_2) : ( M_PI_2 + angle);
+
+        FloatType abs_radius = abs(radius);
+        transform::MatrixSE2<FloatType> result_pose_relative(abs_radius*cos(angle_relative), abs_radius*sin(angle_relative), angle);
+
+        result_pose = rotate_center_absolute * result_pose_relative;
+    }
+    return result_pose;
+}
+
+
+
+
+
+autodiff::var
+curve_opt_fnd(const autodiff::ArrayXvar& x,  const transform::Transform2d& current_pose, const transform::Transform2d& target_pose,const std::vector<float>& weight)
+{
+    autodiff::var r = 0.0;
+
+    transform::MatrixSE2<autodiff::var> init_pose(current_pose );
+
+    transform::MatrixSE2<autodiff::var>next_pose = updateCurveDistDiff(init_pose, x(0),x(1));
+
+//    autodiff::var x1 = x(1) * 0.5;
+//    transform::MatrixSE2<autodiff::var>control_pose = updateCurveDistDiff(init_pose, x(0), x1 );
+
+//    next_pose = updateCurveDistDiff(init_pose, x(2),x(3));
+    next_pose = updateCurveDistDiff(next_pose, x(2),x(3));
+    next_pose = updateCurveDistDiff(next_pose, x(4),x(5));
+
+//    transform::Transform2d next_pose = updateCurveDIst(current_pose, x(0),x(1));
+    r =  ((next_pose.x() - target_pose.x() )*(next_pose.x() - target_pose.x() ) + (next_pose.y() - target_pose.y() )*(next_pose.y() - target_pose.y() ) )*weight[0]
+            + (next_pose.yaw() - target_pose.yaw() )*(next_pose.yaw() - target_pose.yaw() )*weight[1]
+            + (x(4)*x(4))*weight[2]
+//            + ( x(0)*x(1)*x(0)*x(1) + x(2)*x(3)*x(2)*x(3) + x(4)*x(5)*x(4)*x(5))*weight[3]
+//            + ( (x(5) < 0.2) ? (  (x(5) - 0.2) * (x(5) - 0.2) * weight[4] ) : (x(5) - 0.2) * (x(5) - 0.2)*0.0  )
+//            + 0.1*control_pose.x() *control_pose.x()
+            ;
+
+    return r;
+}
+
+struct CurveCostFunction{
+    transform::Transform2d current_pose;
+    transform::Transform2d target_pose;
+    std::vector<float> weight;
+    CurveCostFunction(const transform::Transform2d& t_current_poose, const transform::Transform2d & t_target_pose ):current_pose(t_current_poose), target_pose(t_target_pose){
+
+
+    }
+
+    double operator()(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
+    {
+
+        autodiff::ArrayXvar xd = x.eval();
+
+        autodiff::var y = curve_opt_fnd(xd,current_pose,target_pose,weight);
+
+        if (grad_out) {
+            Eigen::VectorXd grad_tmp = autodiff::gradient(y, xd);
+
+            *grad_out = grad_tmp;
+        }
+
+        return autodiff::val(y);
+    }
+
+};
 
 struct CircleCostFunction{
 
@@ -542,6 +765,254 @@ struct MotionControl{
 
 };
 
+
+
+//https://sol2.readthedocs.io/en/v2.20.6/exceptions.html#lua-handlers
+
+int my_exception_handler(lua_State* L, sol::optional<const std::exception&> maybe_exception, sol::string_view description) {
+    // L is the lua state, which you can wrap in a state_view if necessary
+    // maybe_exception will contain exception, if it exists
+    // description will either be the what() of the exception or a description saying that we hit the general-case catch(...)
+    std::cout << "An exception occurred in a function, here's what it says ";
+    if (maybe_exception) {
+        std::cout << "(straight from the exception): ";
+        const std::exception& ex = *maybe_exception;
+        std::cout << ex.what() << std::endl;
+    }
+    else {
+        std::cout << "(from the description parameter): ";
+        std::cout.write(description.data(), description.size());
+        std::cout << std::endl;
+    }
+
+    // you must push 1 element onto the stack to be
+    // transported through as the error object in Lua
+    // note that Lua -- and 99.5% of all Lua users and libraries -- expects a string
+    // so we push a single string (in our case, the description of the error)
+    return sol::stack::push(L, description);
+}
+
+void plotTransform2d(const transform::Transform2d& pose,const char* color = "black", float length = 0.03){
+
+    auto a = matplot::arrow(pose.x(), pose.y(), pose.x() + length*std::cos(pose.yaw()),pose.y() + length*std::sin(pose.yaw()));
+
+    a->color(color);
+}
+
+void test_updateCurveDIst(){
+    transform::Transform2d pose(0.5,0.2,-0.1);
+    float radius = 0.3;
+    float curve = 1.0/radius;
+    int N = 30;
+    float dist_inc = 2*M_PI*radius/float(N);
+    float dist = 0.0;
+    transform::Transform2d next_pose;
+
+
+
+
+    auto a =matplot::arrow(pose.x(), pose.y(), pose.x() + 0.03*std::cos(pose.yaw()),pose.y() + 0.03*std::sin(pose.yaw()));
+
+    PLOGW << "round 1" <<std::endl;
+    a->color("red");
+    curve = 1.0/radius;
+    dist = 0.0;
+    for(int i = 0 ; i < N; i++){
+        next_pose = updateCurveDIst(pose, curve, dist);
+
+        plotTransform2d(next_pose,"blue");
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+
+    for(int i = 0 ; i < N; i++){
+        next_pose = updateCurveDIst(next_pose, 0.0, 0.1);
+        plotTransform2d(next_pose,"blue");
+
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+
+    PLOGW << "round 2" <<std::endl;
+
+    pose = next_pose;
+    curve = -1.0/radius;
+    dist = 0.0;
+
+    for(int i = 0 ; i < N; i++){
+        next_pose = updateCurveDIst(pose, curve, dist);
+        plotTransform2d(next_pose,"blue");
+
+
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+
+
+    dist = 0.0;
+
+    for(int i = 0 ; i < N/2; i++){
+        next_pose = updateCurveDIst(next_pose, 0.0, -0.1);
+        plotTransform2d(next_pose,"blue");
+
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+
+
+    pose = next_pose;
+    curve = -1.0/radius;
+    dist = 0.0;
+
+    for(int i = 0 ; i < N; i++){
+        next_pose = updateCurveDIst(pose, curve, -dist);
+        plotTransform2d(next_pose,"blue");
+
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+
+    pose = next_pose;
+    curve = 1.0/radius;
+    dist = 0.0;
+
+    for(int i = 0 ; i < N; i++){
+        next_pose = updateCurveDIst(pose, curve, -dist);
+        plotTransform2d(next_pose,"blue");
+
+
+        char buffer[20];
+        sprintf(buffer, "%i", i);
+        matplot::text(next_pose.x(), next_pose.y(), buffer)->color("red").font_size(8);
+
+//            PLOGD << "curve : " << curve << ", dist : " << dist << ", next_pose : " << next_pose << "\n";
+        dist += dist_inc;
+    }
+    matplot::show();
+}
+
+void test_PathSolver(float init_x, float init_y, float init_yaw){
+
+
+    float current_vel[2] = {0.1, 0.0};
+
+    transform::Transform2d robot_init_pose(init_x,init_y,init_yaw);
+    transform::Transform2d target_pose(0.0,0.0,0.0);
+    plotTransform2d(robot_init_pose,"green");
+    plotTransform2d(target_pose,"red");
+
+
+
+
+    size_t optim_param_num = 6;
+    Eigen::VectorXd x(optim_param_num);
+    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+    optim::algo_settings_t settings;
+//    settings.iter_max = 20;
+//    settings.bfgs_settings.wolfe_cons_1 = 1e-4;
+//    settings.bfgs_settings.wolfe_cons_2 = 0.8;
+
+//    settings.print_level = 1;
+
+    settings.vals_bound = true;
+
+    settings.lower_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.lower_bounds(0) = -100.0;
+    settings.lower_bounds(1) = 0.0;
+    settings.lower_bounds(2) = -100.0;
+    settings.lower_bounds(3) = 0.0;
+
+    settings.lower_bounds(4) = -100.0;
+    settings.lower_bounds(5) = 0.0;
+    settings.upper_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.upper_bounds(0) = 100.0;
+    settings.upper_bounds(1) = 1.0;
+    settings.upper_bounds(2) = 100.0;
+    settings.upper_bounds(3) = 1.0;
+
+    settings.upper_bounds(4) = 100.0;
+    settings.upper_bounds(5) = 1.0;
+    CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
+
+    opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+    bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
+
+    if (success) {
+        std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
+    } else {
+        std::cout << "bfgs: reverse-mode autodiff test completed unsuccessfully.\n" << std::endl;
+    }
+
+    std::cout << "solution: x = \n" << x << std::endl;
+
+
+    float curve = 0.0;
+    float dist = 0.0;
+    int N= 30;
+    float dist_inc = x(1)/float(N);
+    transform::Transform2d next_pose;
+
+    dist = 0.0;
+    curve= x(0);
+    dist_inc = x(1)/float(N);
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+        plotTransform2d(next_pose,"blue");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(0), x(1));
+    plotTransform2d(robot_init_pose,"red");
+    dist = 0.0;
+    curve= x(2);
+    dist_inc = x(3)/float(N);
+
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+        plotTransform2d(next_pose,"black");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(2), x(3));
+    plotTransform2d(robot_init_pose,"red");
+
+    dist = 0.0;
+    curve= x(4);
+    dist_inc = x(5)/float(N);
+
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+        plotTransform2d(next_pose,"blue");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(4), x(5));
+    plotTransform2d(robot_init_pose,"red");
+
+    matplot::ylim({-2, +2});
+    matplot::xlim({-3, +1});
+
+
+}
+
 int main(int argc, char** argv){
 
 
@@ -549,7 +1020,38 @@ int main(int argc, char** argv){
     plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender; // Create the 2nd appender.
     plog::init(plog::debug, &fileAppender).addAppender(&consoleAppender); // Initialize the logger with the both appenders.
 
+    sol::state lua;
+    std::cout << "=== opening a state ===" << std::endl;
 
+    // open some common libraries
+    lua.open_libraries(sol::lib::base, sol::lib::package,sol::lib::os, sol::lib::table, sol::lib::jit,sol::lib::coroutine);
+
+    lua.set_exception_handler(&my_exception_handler);
+
+
+    {
+
+
+//        test_updateCurveDIst();
+        test_PathSolver(-0.8, 0.1, 0.2);
+        test_PathSolver(-0.6, 0.2, 0.2);
+
+        test_PathSolver(-0.8, -0.1, 0.2);
+        test_PathSolver(-0.6, -0.2, 0.2);
+
+
+        test_PathSolver(-0.8, 0.1, -0.3);
+        test_PathSolver(-0.6, 0.2, -0.3);
+
+        test_PathSolver(-0.8, -0.1, -0.3);
+        test_PathSolver(-0.6, -0.2, -0.3);
+
+
+
+        matplot::show();
+
+        return 0;
+    }
 
     //==== ros
     ros::init(argc, argv, "scan_matching");
