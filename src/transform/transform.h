@@ -56,6 +56,7 @@ namespace transform{
             auto& c = result.matrix;
             // Calculate the j-th column of the result in-place (in B) using the helper array
 
+//            std::cout << "check matrix mul:\n";
             for(int i=0 ; i<3 ; i++)
             {
                 for(int j=0 ; j<3 ; j++)
@@ -64,9 +65,11 @@ namespace transform{
                     c[i][j]=0;
                     for(int k=0 ; k<3 ; k++)
                     {
+//                        std::cout <<" [ " <<  a[i][k] << " * " << b[k][j] << " ] " ;
                         c[i][j]+=a[i][k]*b[k][j];
                         //--^-- should be k
                     }
+//                    std::cout << " = " << c[i][j] << "\n";
 
                 }
             }
@@ -82,6 +85,7 @@ namespace transform{
             auto& c = result.matrix;
             // Calculate the j-th column of the result in-place (in B) using the helper array
 
+//            std::cout << "check matrix multiply:\n";
             for(int i=0 ; i<3 ; i++)
             {
                 for(int j=0 ; j<3 ; j++)
@@ -90,9 +94,11 @@ namespace transform{
                     c[i][j]=0;
                     for(int k=0 ; k<3 ; k++)
                     {
+//                        std::cout <<" [ " <<  a[i][k] << " * " << b[k][j] << " ] " ;
                         c[i][j]+=a[i][k]*b[k][j];
                         //--^-- should be k
                     }
+//                    std::cout << " = " << c[i][j] << "\n";
 
                 }
             }

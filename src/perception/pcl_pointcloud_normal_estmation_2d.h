@@ -257,29 +257,24 @@ namespace perception{
             int rt = 0;
             std::vector<int> query_indices;
             std::vector<float> query_distance;
+            NormalEst2d normalEst2d;
+
 #pragma omp parallel for \
-firstprivate(m_NormalEst2d,query_indices,query_distance)
+firstprivate(normalEst2d,query_indices,query_distance)
             for(int i = 0 ; i < input_point_num;i++){
+                rt = m_tree.radiusSearch (m_input_cloud->at(i), m_query_radius, query_indices, query_distance);
+                if( query_indices.size () >3){
+                    normalEst2d.addCenter(m_input_cloud->at(query_indices[0]).x,m_input_cloud->at(query_indices[0]).y);
 
-
-
-                auto& query_point = m_input_cloud->at(i);
-                rt = m_tree.radiusSearch (query_point, m_query_radius, query_indices, query_distance);
-
-                std::size_t point_count;
-                point_count = query_indices.size ();
-                m_NormalEst2d.reset();
-
-                m_NormalEst2d.addCenter(m_input_cloud->at(query_indices[0]).x,m_input_cloud->at(query_indices[0]).y);
-
-                for (const auto &index : query_indices)
-                {
-                    Scalar x = m_input_cloud->at(index).x  , y = m_input_cloud->at(index).y ;
-                    m_NormalEst2d.addPoints(x,y);
+                    for (const auto &index : query_indices)
+                    {
+                        Scalar x = m_input_cloud->at(index).x  , y = m_input_cloud->at(index).y ;
+                        normalEst2d.addPoints(x,y);
+                    }
+                    normalEst2d.compute(output->points[i].normal_x,output->points[i].normal_y,output->points[i].normal_z,output->points[i].curvature);
+                }else{
+                    output->points[i].normal_x = output->points[i].normal_y = output->points[i].normal_z = output->points[i].curvature = std::numeric_limits<float>::quiet_NaN ();
                 }
-
-                m_NormalEst2d.compute(output->points[i].normal_x,output->points[i].normal_y,output->points[i].normal_z,output->points[i].curvature);
-
             }
 
         }

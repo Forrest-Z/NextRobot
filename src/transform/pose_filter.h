@@ -112,6 +112,7 @@ namespace transform{
     private:
         int max_len = 5;
         std::deque<transform::Transform2d> buffer;
+        float weight_latest = 0.6;
 
     public:
         PoseFilter(int t_max_len = 5):max_len(t_max_len){ }
@@ -122,21 +123,34 @@ namespace transform{
             if(buffer.size() > max_len){
                 buffer.pop_back();
             }
+
             buffer.emplace_front(t_pose);
-
-            float x = 0.0, y = 0.0 ,yaw = 0.0;
-            float init_yaw = t_pose.yaw();
             transform::Transform2d relative_pose;
-            for(int i = 1 ; i < buffer.size();i++){
-                x += buffer[i].x();
-                y += buffer[i].y();
-                yaw += angle_normalise(buffer[i].yaw(), init_yaw) ;
-            }
-            x /= buffer.size();
-            y /= buffer.size();
-            yaw /= buffer.size();
 
-            relative_pose.set(x,y,yaw);
+
+            if(buffer.size() > 1){
+                float x = 0.0, y = 0.0 ,yaw = 0.0;
+                float init_yaw = t_pose.yaw();
+
+                float weight_old = (1.0 - weight_latest )/ float(buffer.size() - 1);
+
+                x += t_pose.x()*weight_latest;
+                y += t_pose.y()*weight_latest;
+                yaw += init_yaw*weight_latest ;
+
+                for(int i = 1 ; i < buffer.size();i++){
+                    x += buffer[i].x()*weight_old;
+                    y += buffer[i].y()*weight_old;
+                    yaw += angle_normalise(buffer[i].yaw(), init_yaw)*weight_old ;
+                }
+
+                relative_pose.set(x,y,yaw);
+            }else{
+
+                return t_pose;
+            }
+
+
 
             return relative_pose;
         }

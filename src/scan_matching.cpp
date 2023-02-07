@@ -1011,6 +1011,8 @@ public:
 
         // input_cloud ->filter -> filtered_input_cloud
         filterReading(t_cloud_reading, cloud_reading_filtered);
+        PLOGD   <<" filterReading ok "  << std::endl;
+
         if(cloud_reading_filtered->empty()){
             return;
         }
@@ -1019,9 +1021,12 @@ public:
 #if 1
         // filtered_input_cloud + norm for icp
         computeNorm(cloud_reading_filtered, temp_cloud_norm);
+        PLOGD   <<" computeNorm ok "  << std::endl;
 
         //
         removeReadingShadow(temp_cloud_norm, cloud_reading_filtered_norm);
+        PLOGD   <<" removeReadingShadow ok "  << std::endl;
+
 #endif
 
 #if 0
@@ -1651,7 +1656,7 @@ int main(int argc, char **argv) {
 
         scan_get_data = scan_handler.range_valid_num > 100;
 
-//        PLOGD << "movement_check.isStill(): " << movement_check.isStill() <<", range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
+        PLOGD   <<" range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
 
 #endif
 
@@ -2007,11 +2012,16 @@ int main(int argc, char **argv) {
             common::Time t1 = common::FromUnixNow();
 
             sensor::LaserScanToPclPointCloud(scan_handler.local_xy_points, scan_handler.range_valid_num, pcl_cloud_raw);
+            PLOGD   <<" LaserScanToPclPointCloud ok "  << std::endl;
 
 
             solver.addSensorReading(pcl_cloud_raw);
+            PLOGD   <<" addSensorReading ok "  << std::endl;
+
             if(std::strcmp(mode.c_str(), MODE_MAP) ==0 ){
                 solver.match_v2();
+                PLOGD   <<" match_v2 ok "  << std::endl;
+
 
             }
 

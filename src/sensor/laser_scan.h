@@ -405,7 +405,7 @@ namespace sensor{
                     float r = ranges_[j];
                     float d1 = std::abs(ranges_[ranges_valid_index[i-1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i]-ranges_valid_index[i-1]);
                     float d2 = std::abs(ranges_[ranges_valid_index[i+1]] - ranges_[ranges_valid_index[i]])*(ranges_valid_index[i+1] - ranges_valid_index[i]);
-                    float w = 0.5f/(ranges_valid_index[i+1]-ranges_valid_index[i-1]);
+                    float w = 0.1f/(ranges_valid_index[i+1]-ranges_valid_index[i-1]);
 
                     r = (1.0 -w )*ranges_[ranges_valid_index[i]] + w*(d2*ranges_[ranges_valid_index[i-1]] + d1*ranges_[ranges_valid_index[i+1]]   )/(d1+d2);
                     (ranges_[ranges_valid_index[i-1]] +ranges_[ranges_valid_index[i]]+ranges_[ranges_valid_index[i+1]] );
