@@ -54,7 +54,7 @@ namespace sensor{
 
     void LaserScanToPointCloud2(const std::vector<float> &scan_points, int point_num, sensor_msgs::PointCloud2 &cloud) {
         int point_num_ = 0.5 * (scan_points.size());
-        if (point_num_ <= point_num) {
+        if (point_num_ < point_num) {
             return;
         }
         cloud.row_step = point_num * cloud.point_step;
@@ -74,6 +74,9 @@ namespace sensor{
 
     void LaserScanToPointCloud2(const std::vector<geometry::Point> &scan_points, int point_num, sensor_msgs::PointCloud2 &cloud) {
         int point_num_ = (scan_points.size());
+        if (point_num_ < point_num) {
+            return;
+        }
         point_num = point_num<= point_num_ ? point_num:point_num_;
 
         cloud.row_step = point_num * cloud.point_step;

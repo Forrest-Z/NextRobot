@@ -26,7 +26,7 @@
 #include "sensor_msgs/LaserScan.h"
 #include "xmlrpcpp/XmlRpc.h"
 
-#include <matplot/matplot.h>
+//#include <matplot/matplot.h>
 
 
 #include "nlohmann/json.hpp"
@@ -47,7 +47,9 @@
 #include "sensor/pointcloud_ros.h"
 
 #include "perception/pointcloud_detection.h"
-
+#include "perception/laserscan_filter.h"
+#include "perception/optim_circle_solver.h"
+#include "perception/pcl_circle_fitting.h"
 
 #define OPTIM_ENABLE_EIGEN_WRAPPERS
 #include "optim.hpp"
@@ -65,18 +67,7 @@
 #include "pid.h"
 
 
-autodiff::var
-circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<geometry::Point>& points,int point_num, float radius_2)
-{
-    autodiff::var r = 0.0;
-    autodiff::var t = 0.0;
 
-    for(int i = 0 ; i < point_num ;i++){
-        t = (x(0) - points[i].x)*(x(0) - points[i].x) + (x(1) - points[i].y)*(x(1) - points[i].y) - radius_2;
-        r += t*t;
-    }
-    return r;
-}
 
 /*
 
@@ -131,70 +122,6 @@ circle_opt_fnd(const autodiff::ArrayXvar& x, const std::vector<geometry::Point>&
 
   */
 
-namespace transform{
-    template<typename FloatType>
-    struct MatrixSE2{
-        std::array<std::array<FloatType,3>,3> matrix;
-        MatrixSE2(FloatType x = 0.0, FloatType y = 0.0, FloatType yaw = 0.0){
-            set(x,y,yaw);
-        }
-
-        MatrixSE2(const Transform2d& rhv){
-            set(rhv.x(),rhv.y(),rhv.yaw());
-        }
-
-        FloatType x() const {
-            return matrix[0][2];
-        }
-        FloatType y() const {
-            return matrix[1][2];
-        }
-        FloatType yaw() const {
-            return atan2(matrix[1][0],matrix[0][0]);
-        }
-        void set(FloatType x, FloatType y, FloatType yaw){
-            matrix[0][0] = cos(yaw);
-            matrix[0][1]  = -sin(yaw);
-            matrix[1][0] = sin(yaw);
-            matrix[1][1]  = cos(yaw);
-
-            matrix[0][2]  = x;
-            matrix[1][2]  = y;
-
-            matrix[2][0]  = 0.0;
-            matrix[2][1]  = 0.0;
-            matrix[2][2]  = 1.0;
-        }
-
-        MatrixSE2<FloatType> operator*(const MatrixSE2<FloatType>& rhv)const{
-            MatrixSE2<FloatType> result;
-
-            auto& a = this->matrix;
-            auto& b = rhv.matrix;
-            auto& c = result.matrix;
-            // Calculate the j-th column of the result in-place (in B) using the helper array
-
-//            std::cout << "check matrix mul:\n";
-            for(int i=0 ; i<3 ; i++)
-            {
-                for(int j=0 ; j<3 ; j++)
-                {
-
-                    c[i][j]=0;
-                    for(int k=0 ; k<3 ; k++)
-                    {
-//                        std::cout <<" [ " <<  a[i][k] << " * " << b[k][j] << " ] " ;
-                        c[i][j]+=a[i][k]*b[k][j];
-                        //--^-- should be k
-                    }
-//                    std::cout << " = " << c[i][j] << "\n";
-
-                }
-            }
-            return result;
-        }
-    };
-}
 
 transform::Transform2d updateCurveDIst(const transform::Transform2d& init_pose, float curve, float dist){
     transform::Transform2d result_pose;
@@ -242,6 +169,61 @@ transform::MatrixSE2<FloatType> updateCurveDistDiff(const transform::MatrixSE2<F
 
 
 
+autodiff::var
+curve_opt_fnd2(const autodiff::ArrayXvar& x,  const transform::Transform2d& current_pose, const transform::Transform2d& target_pose,const std::vector<float>& weight)
+{
+    autodiff::var r = 0.0;
+
+    transform::MatrixSE2<autodiff::var> init_pose(current_pose );
+
+    transform::MatrixSE2<autodiff::var>next_pose = updateCurveDistDiff(init_pose, x(0),x(1));
+
+    transform::MatrixSE2<autodiff::var> max_x_pose;
+
+    for(float i = 0.1 ; i < 1.0 ; i+= 0.1){
+        autodiff::var tmp_ratio = x(1) * i;
+        transform::MatrixSE2<autodiff::var>next_pose_test = updateCurveDistDiff(init_pose, x(0),tmp_ratio);
+
+        if(abs(next_pose_test.x()) > abs(max_x_pose.x()) ){
+            max_x_pose = next_pose_test;
+        }
+    }
+
+//    autodiff::var x1 = x(1) * 0.5;
+//    transform::MatrixSE2<autodiff::var>control_pose = updateCurveDistDiff(init_pose, x(0), x1 );
+
+//    next_pose = updateCurveDistDiff(init_pose, x(2),x(3));
+    next_pose = updateCurveDistDiff(next_pose, x(2),x(3));
+    next_pose = updateCurveDistDiff(next_pose, x(4),x(5));
+
+
+    autodiff::var d = (next_pose.x() - target_pose.x() )*(next_pose.x() - target_pose.x() ) + (next_pose.y() - target_pose.y() )*(next_pose.y() - target_pose.y() ) ;
+#if 0
+    if(d < weight[0]){
+        d *= weight[1];
+    }else{
+        d = weight[0]*weight[1] + (d - weight[0] );
+    }
+
+#endif
+//    transform::Transform2d next_pose = updateCurveDIst(current_pose, x(0),x(1));
+    r =  (d)*weight[2];
+//            + (x(4)*x(4))*weight[4]
+//            + ( x(0)*x(1)*x(0)*x(1) + x(2)*x(3)*x(2)*x(3) + x(4)*x(5)*x(4)*x(5))*weight[3]
+//            + ( (x(5) < 0.2) ? (  (x(5) - 0.2) * (x(5) - 0.2) * weight[4] ) : (x(5) - 0.2) * (x(5) - 0.2)*0.0  )
+//            + 0.1*control_pose.x() *control_pose.x()
+    ;
+    if(d < 0.04  ){
+        r += (next_pose.yaw() - target_pose.yaw() )*(next_pose.yaw() - target_pose.yaw() )*weight[3]
+             + (x(4)*x(4))*weight[4];
+    }
+#if 0
+    if(d < 0.01 && ( (abs(max_x_pose.x()) - abs(init_pose.x()) ) > 0.1  ) ){
+        r += abs(max_x_pose.x()) * weight[5];
+    }
+#endif
+    return r;
+}
 
 
 autodiff::var
@@ -252,22 +234,49 @@ curve_opt_fnd(const autodiff::ArrayXvar& x,  const transform::Transform2d& curre
     transform::MatrixSE2<autodiff::var> init_pose(current_pose );
 
     transform::MatrixSE2<autodiff::var>next_pose = updateCurveDistDiff(init_pose, x(0),x(1));
+//    std::cout << "check x " << x << "\n";
+//    std::cout << "check next_pose 1 " << next_pose.x() << ", " << next_pose.y() << ", " << next_pose.yaw() << "\n";
 
 //    autodiff::var x1 = x(1) * 0.5;
 //    transform::MatrixSE2<autodiff::var>control_pose = updateCurveDistDiff(init_pose, x(0), x1 );
 
 //    next_pose = updateCurveDistDiff(init_pose, x(2),x(3));
     next_pose = updateCurveDistDiff(next_pose, x(2),x(3));
+//    std::cout << "check next_pose 2 " << next_pose.x() << ", " << next_pose.y() << ", " << next_pose.yaw() << "\n";
+
     next_pose = updateCurveDistDiff(next_pose, x(4),x(5));
+//    std::cout << "check next_pose 3 " << next_pose.x() << ", " << next_pose.y() << ", " << next_pose.yaw() << "\n";
+
+    autodiff::var dist_error = (next_pose.x() - target_pose.x() )*(next_pose.x() - target_pose.x() ) + (next_pose.y() - target_pose.y() )*(next_pose.y() - target_pose.y() ) ;
+
+    autodiff::var angle_error = (next_pose.yaw() - target_pose.yaw() )*(next_pose.yaw() - target_pose.yaw() );
+
+    autodiff::var final_curve = x(4)*x(4);
+    autodiff::var roate_angle_1 = abs(x(0)*x(1));
+    autodiff::var roate_angle_2 = abs(x(2)*x(3));
+    autodiff::var roate_angle_3 = abs(x(4)*x(5));
+
+
 
 //    transform::Transform2d next_pose = updateCurveDIst(current_pose, x(0),x(1));
-    r =  ((next_pose.x() - target_pose.x() )*(next_pose.x() - target_pose.x() ) + (next_pose.y() - target_pose.y() )*(next_pose.y() - target_pose.y() ) )*weight[0]
-            + (next_pose.yaw() - target_pose.yaw() )*(next_pose.yaw() - target_pose.yaw() )*weight[1]
-            + (x(4)*x(4))*weight[2]
-//            + ( x(0)*x(1)*x(0)*x(1) + x(2)*x(3)*x(2)*x(3) + x(4)*x(5)*x(4)*x(5))*weight[3]
+    r =  dist_error*weight[0]
+            + angle_error*weight[1]
+            + final_curve*weight[2]
+            + ( roate_angle_1 + roate_angle_2 + roate_angle_3)*weight[3]
+
 //            + ( (x(5) < 0.2) ? (  (x(5) - 0.2) * (x(5) - 0.2) * weight[4] ) : (x(5) - 0.2) * (x(5) - 0.2)*0.0  )
 //            + 0.1*control_pose.x() *control_pose.x()
             ;
+
+
+
+//    std::cout << "check dist_error x " << next_pose.x() - target_pose.x() << "\n";
+//    std::cout << "check dist_error y " << next_pose.y() - target_pose.y() << "\n";
+//    std::cout << "check dist_error yaw" << next_pose.yaw() - target_pose.yaw() << "\n";
+
+//    std::cout << "check error " << dist_error << ", " << angle_error << ", " << final_curve  << "\n";
+//    std::cout << "check error_sum " << r  << "\n";
+
 
     return r;
 }
@@ -299,394 +308,19 @@ struct CurveCostFunction{
 
 };
 
-struct CircleCostFunction{
 
-    const std::vector<geometry::Point>& points;
-    int point_num;
-    float radius = 0.1;
-    float radius_2 = radius;
 
 
-    CircleCostFunction(const std::vector<geometry::Point>& t_points, int t_point_num, float t_radius):points(t_points),point_num(t_point_num), radius(t_radius),radius_2(radius*radius){
-    }
 
 
 
-    double operator()(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* opt_data)
-    {
 
-        autodiff::ArrayXvar xd = x.eval();
 
-        autodiff::var y = circle_opt_fnd(xd,points,point_num,radius_2);
 
-        if (grad_out) {
-            Eigen::VectorXd grad_tmp = autodiff::gradient(y, xd);
-
-            *grad_out = grad_tmp;
-        }
-
-        return autodiff::val(y);
-    }
-};
-
-
-/*
- box filter
- remove points outside of box
- */
-void LaserScanBoxFilter(const std::vector<float> &scan_points, int point_num,
-                        std::vector<geometry::Point>& filter_points, int& filter_point_num,
-                        float min_x, float max_x, float min_y, float max_y
-                        ) {
-
-    filter_point_num = 0;
-    bool valid = false;
-    filter_points.resize(point_num);
-    for (int i = 0; i < point_num; i++) {
-        valid = scan_points[i + i]> min_x && scan_points[i + i] < max_x && scan_points[i + i + 1] > min_y && scan_points[i + i + 1] < max_y;
-        filter_points[filter_point_num].x = scan_points[i + i];
-        filter_points[filter_point_num].y = scan_points[i + i + 1];
-        filter_points[filter_point_num].r = std::sqrt(scan_points[i + i + 1]*scan_points[i + i + 1] + scan_points[i + i]*scan_points[i + i]);
-
-        filter_point_num += valid;
-
-    }
-
-}
-
-void LaserScanBoxFilter(const std::vector<float> &scan_points_laser, const std::vector<float> &scan_points_base, int point_num,
-                        std::vector<geometry::Point>& filter_points_laser, std::vector<geometry::Point>& filter_points_base, int& filter_point_num,
-                        float min_x, float max_x, float min_y, float max_y
-) {
-
-    filter_point_num = 0;
-    bool valid = false;
-    filter_points_base.resize(point_num);
-    filter_points_laser.resize(point_num);
-
-    for (int i = 0; i < point_num; i++) {
-        valid = scan_points_base[i + i]> min_x && scan_points_base[i + i] < max_x && scan_points_base[i + i + 1] > min_y && scan_points_base[i + i + 1] < max_y;
-        filter_points_base[filter_point_num].x = scan_points_base[i + i];
-        filter_points_base[filter_point_num].y = scan_points_base[i + i + 1];
-        filter_points_base[filter_point_num].r = std::sqrt(scan_points_base[i + i + 1]*scan_points_base[i + i + 1] + scan_points_base[i + i]*scan_points_base[i + i]);
-
-        filter_points_laser[filter_point_num].x = scan_points_laser[i + i];
-        filter_points_laser[filter_point_num].y = scan_points_laser[i + i + 1];
-        filter_points_laser[filter_point_num].r = std::sqrt(scan_points_laser[i + i + 1]*scan_points_laser[i + i + 1] + scan_points_laser[i + i]*scan_points_laser[i + i]);
-
-
-        filter_point_num += valid;
-
-    }
-//    filter_point_num ++;
-
-
-}
-
-void LaserScanRadiusFilter(const std::vector<float> &scan_points_laser, const std::vector<float> &scan_points_base, int point_num,
-                        std::vector<geometry::Point>& filter_points_laser, std::vector<geometry::Point>& filter_points_base, int& filter_point_num,
-                        float relative_x, float relative_y, float filter_radius
-) {
-
-    filter_point_num = 0;
-    bool valid = false;
-    filter_points_base.resize(point_num);
-    filter_points_laser.resize(point_num);
-
-    filter_radius *= filter_radius;
-
-    for (int i = 0; i < point_num; i++) {
-        valid = ((scan_points_base[i + i] - relative_x)*(scan_points_base[i + i] - relative_x) + ( scan_points_base[i + i + 1] - relative_y)*( scan_points_base[i + i + 1] - relative_y)) < filter_radius;
-//        std::cout << "** " << scan_points_base[i + i] << ", " << scan_points_base[i + i + 1] << ", " << valid << "\n";
-        filter_points_base[filter_point_num].x = scan_points_base[i + i];
-        filter_points_base[filter_point_num].y = scan_points_base[i + i + 1];
-        filter_points_base[filter_point_num].r = std::sqrt(scan_points_base[i + i + 1]*scan_points_base[i + i + 1] + scan_points_base[i + i]*scan_points_base[i + i]);
-        filter_points_base[filter_point_num].b = std::atan2(scan_points_base[i + i + 1], scan_points_base[i + i]);
-        filter_points_laser[filter_point_num].x = scan_points_laser[i + i];
-        filter_points_laser[filter_point_num].y = scan_points_laser[i + i + 1];
-        filter_points_laser[filter_point_num].r = std::sqrt(scan_points_laser[i + i + 1]*scan_points_laser[i + i + 1] + scan_points_laser[i + i]*scan_points_laser[i + i]);
-        filter_points_laser[filter_point_num].b = std::atan2(scan_points_laser[i + i + 1], scan_points_laser[i + i]);
-
-
-        filter_point_num += valid;
-
-    }
-//    filter_point_num ++;
-
-
-}
-
-
-
-/*
- find
- */
-void LaserScanSegment( const std::vector<geometry::Point>& filter_points, std::vector<std::vector<geometry::Point>>& segments, int filter_point_num, float split_dist_x,float split_dist_y,float split_dist_r, int min_point_in_seg_num
-) {
-
-
-    segments.clear();
-
-    if(filter_points.size() < min_point_in_seg_num){
-        return;
-    }
-    // split to segments
-    std::vector<geometry::Point> segment;
-    bool process_done = false;
-//    PLOGD << "filter_point_num " << filter_point_num << std::endl;
-
-    for(int i = 1 ; i < filter_point_num; i++){
-        bool split = std::abs(filter_points[i].x - filter_points[i -1].x) > split_dist_x
-                || std::abs(filter_points[i].y - filter_points[i -1].y) > split_dist_y
-                || std::abs(filter_points[i].r - filter_points[i -1].r) > split_dist_r;
-
-        if(split || (i == filter_point_num-1)){
-
-            for(int j = 0 ; j < filter_point_num ;j++){
-                int l =  (i+j)%filter_point_num;
-                int l_pre = (l-1)%filter_point_num;
-                l_pre = l_pre<0 ? l_pre+ filter_point_num:l_pre;
-
-//                std::cout << "j = " << j << ", l = " << l << ", " << filter_points[l].x << ", " << filter_points[l].y <<"\n ";
-//                std::cout << "check l_pre = " << l_pre << ", " << filter_points[l_pre].x << ", " << filter_points[l_pre].y <<"\n ";
-
-                split = std::abs(filter_points[l].x - filter_points[l_pre].x) > split_dist_x
-                        || std::abs(filter_points[l].y - filter_points[l_pre].y) > split_dist_y
-                        || std::abs(filter_points[l].r - filter_points[l_pre].r) > split_dist_r;
-//                std::cout << "check dist = " << std::abs(filter_points[l].x - filter_points[l_pre].x)  << ", "  << std::abs(filter_points[l].y - filter_points[l_pre].y) <<", "<< std::abs(filter_points[l].r - filter_points[l_pre].r) <<"\n"    ;
-
-
-                if(split|| (j == filter_point_num-1)){
-//                    std::cout << "====== split,  l = " << l << ", j = " << j << ", filter_point_num = " << filter_point_num <<"\n ";
-#if 0
-                    if((j == filter_point_num-1)){
-                        segment.emplace_back(filter_points[l]);
-                    }
-#endif
-                    if(segment.size() > min_point_in_seg_num){
-                        segments.emplace_back(std::move(segment));
-                    }
-
-                    segment.clear();
-
-
-                }
-
-                segment.emplace_back(filter_points[l]);
-
-            }
-
-            process_done = true;
-
-        }
-        if(process_done){
-            break;
-        }
-    }
-
-
-    PLOGD << "init segments.size() " << segments.size() << std::endl;
-
-    float meager_dist = split_dist_x*split_dist_x;
-    for(int i = 0 ; i < segments.size();i++){
-        for(int j = i+1 ; j < segments.size();j++){
-
-            if(segments[i].back().SquareDist(segments[j].front())<meager_dist || segments[j].back().SquareDist(segments[i].front())<meager_dist ){
-                segments[i].insert(segments[i].end(),segments[j].begin(), segments[j].end());
-                segments[j].clear();
-            }
-
-        }
-    }
-#if 1
-
-    std::cout << "check segments:\n";
-    for(auto &s : segments){
-        std::cout << "\ncheck segments points: " << s.size() << "\n";
-
-        for(auto& e: s){
-            std::cout <<"[" << e.x << ", " << e.y << ", " << e.r << "], ";
-        }
-
-    }
-#endif
-
-    PLOGD << "get segments num " << segments.size() << std::endl;
-
-//    std::sort(filter_points.begin(),filter_points.end(), [](auto& v1, auto& v2){ return v1.r < v2.r; });
-    // find center angle
-    // find mean edge point
-
-
-
-
-}
 
 //float NormaliseAngle(float angle, float mean){
 //    while( std::abs(angle - mean) > M_PI)
 //}
-
-// find circle
-void FindCircle(std::vector<geometry::Point>& points,float radius, float edge_radius, float edge_range_offset, int min_point_num, float & center_x, float & center_y, float& error_mean){
-
-    if(points.size() < min_point_num){
-        PLOGD << "check points.size() fail return : " << points.size()  << std::endl;
-
-        error_mean = 100.0;
-        return;
-    }
-    std::sort(points.begin(),points.end(), [](auto& v1, auto& v2){ return v1.r < v2.r; });
-
-
-    float angle_mean = std::atan2(points[0].y,points[0].x ),angle_sum = 0.0;
-//    PLOGD << "check angle_mean: " << angle_mean << std::endl;
-
-    int valid_num = 0;
-    float min_r = points[0].r -0.02, max_r = points[0].r + edge_radius;
-
-//    std::cout << "compute center angle:\n";
-    float normalise_angle = 0.0;
-    for(auto&p : points){
-        normalise_angle = std::abs(p.b - angle_mean) < M_PI ? p.b : (p.b + ((p.b - angle_mean) > 0.0 ? -M_PI*2: M_PI*2) );
-//        std::cout << "angle: " << p.b <<", normalise_angle: " << normalise_angle << "\n";
-
-        if( (p.r < max_r )&&(p.r > min_r) ){
-            angle_sum += normalise_angle;
-            valid_num++;
-
-        }else{
-//            break;
-
-        }
-    }
-
-    if(valid_num < min_point_num){
-        PLOGD << "check valid_num fail return" << std::endl;
-
-        error_mean = 100.0;
-        return;
-    }
-
-
-    angle_mean = angle_sum/float(valid_num);
-    PLOGD << "valid_num: " << valid_num <<"angle_mean "  << angle_mean   << std::endl;
-
-    float ux = std::cos(angle_mean);
-    float uy = std::sin(angle_mean);
-
-
-    float edge_range = 0.0;
-    int egde_num = 0;
-    float angle_offset = std::atan2(edge_range_offset, points[0].r);
-    PLOGD << "angle_offset: " << angle_offset <<", angle_mean "  << angle_mean   << std::endl;
-
-    for(auto&p : points){
-        normalise_angle = std::abs(p.b - angle_mean) < M_PI ? p.b : (p.b + ((p.b - angle_mean) > 0.0 ? -M_PI*2: M_PI*2) );
-//        std::cout << "angle: " << p.b <<", normalise_angle: " << normalise_angle << "\n";
-
-        if(std::abs(normalise_angle - angle_mean)<angle_offset){
-            edge_range += p.r;
-            egde_num++;
-        }else{
-//            break;
-
-        }
-    }
-    PLOGD << "check egde_num: " << egde_num << std::endl;
-
-    if(egde_num < min_point_num){
-        PLOGD << "check egde_num fail return" << std::endl;
-
-        error_mean = 100.0;
-        return;
-    }
-
-    edge_range /= float(egde_num);
-
-    edge_range += radius;
-    PLOGD << "check edge_range: " << edge_range << std::endl;
-
-
-    float cx = ux*(edge_range);
-    float cy = uy*(edge_range);
-
-    center_x = ux*(edge_range);
-    center_y = uy*(edge_range);
-
-//    cx = points[0].x + ux*(radius);
-//    cy = points[0].y + uy*(radius);
-
-    float error_sum = 0.0 ;
-
-
-    error_sum = 0.0;
-//    std::cout << "check error:\n";
-    for(int i = 0 ; i <points.size();i++){
-        auto& p = points[i];
-        float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-//        std::cout << d << ", ";
-        error_sum += std::abs(d- radius) ;
-    }
-    error_mean = error_sum/float(points.size());
-    PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
-
-    PLOGD << "check error_mean: " << error_mean << std::endl;
-
-
-
-    Eigen::VectorXd x(2);
-    x << cx, cy;
-
-    optim::algo_settings_t settings;
-//    settings.iter_max = 20;
-//    settings.bfgs_settings.wolfe_cons_1 = 1e-4;
-//    settings.bfgs_settings.wolfe_cons_2 = 0.8;
-
-//    settings.print_level = 1;
-
-    settings.vals_bound = true;
-
-    settings.lower_bounds = optim::ColVec_t::Zero(2);
-    settings.lower_bounds(0) = cx - 0.03;
-    settings.lower_bounds(1) = cy - 0.03;
-
-    settings.upper_bounds = optim::ColVec_t::Zero(2);
-    settings.upper_bounds(0) = cx + 0.03;
-    settings.upper_bounds(1) = cy + 0.03;
-
-    CircleCostFunction opt_fn_obj(points,valid_num, radius) ;
-
-    bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
-
-    if (success) {
-        std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
-    } else {
-        std::cout << "bfgs: reverse-mode autodiff test completed unsuccessfully.\n" << std::endl;
-    }
-
-    std::cout << "solution: x = \n" << x << std::endl;
-
-    cx = x(0);
-    cy = x(1);
-
-    error_sum = 0.0;
-    for(int i = 0 ; i <points.size();i++){
-        auto& p = points[i];
-        float d = std::sqrt( (p.x - cx)*(p.x  -cx) + (p.y - cy)*(p.y - cy)  );
-//        std::cout << d << ", ";
-        error_sum += std::abs(d- radius) ;
-    }
-    error_mean = error_sum/float(points.size());
-    PLOGD << "check cx: " << cx << ", cy: " << cy << std::endl;
-
-    PLOGD << "check error_mean: " << error_mean << std::endl;
-    center_x = cx;
-    center_y = cy;
-    return  ;
-
-
-
-}
 
 
 
@@ -791,7 +425,7 @@ int my_exception_handler(lua_State* L, sol::optional<const std::exception&> mayb
     // so we push a single string (in our case, the description of the error)
     return sol::stack::push(L, description);
 }
-
+#if 0
 void plotTransform2d(const transform::Transform2d& pose,const char* color = "black", float length = 0.03){
 
     auto a = matplot::arrow(pose.x(), pose.y(), pose.x() + length*std::cos(pose.yaw()),pose.y() + length*std::sin(pose.yaw()));
@@ -955,7 +589,8 @@ void test_PathSolver(float init_x, float init_y, float init_yaw){
     settings.upper_bounds(5) = 1.0;
     CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
 
-    opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+    opt_fn_obj.weight = std::vector<float>{0.02*0.02,0.1,1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+   opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
     bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
 
     if (success) {
@@ -1013,10 +648,222 @@ void test_PathSolver(float init_x, float init_y, float init_yaw){
 
 }
 
+
+void test_2(){
+
+//        test_updateCurveDIst();
+    test_PathSolver(-0.8, 0.1, 0.2);
+    test_PathSolver(-0.6, 0.2, 0.2);
+
+    test_PathSolver(-0.8, -0.1, 0.2);
+    test_PathSolver(-0.6, -0.2, 0.2);
+
+
+    test_PathSolver(-0.8, 0.1, -0.3);
+    test_PathSolver(-0.6, 0.2, -0.3);
+
+    test_PathSolver(-0.8, -0.1, -0.3);
+    test_PathSolver(-0.6, -0.2, -0.3);
+
+    test_PathSolver(-0.1, -0.05, -0.05);
+    test_PathSolver(-0.2, -0.1, -0.1);
+
+
+    matplot::show();
+}
+#endif
+
+
+Eigen::VectorXd  test_PathSolver(float init_x, float init_y, float init_yaw){
+
+
+    float current_vel[2] = {0.1, 0.0};
+
+    transform::Transform2d robot_init_pose(init_x,init_y,init_yaw);
+    transform::Transform2d target_pose(0.0,0.0,0.0);
+//    plotTransform2d(robot_init_pose,"green");
+//    plotTransform2d(target_pose,"red");
+
+
+
+
+    size_t optim_param_num = 6;
+    Eigen::VectorXd x(optim_param_num);
+    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+    optim::algo_settings_t settings;
+    settings.iter_max = 50;
+    settings.bfgs_settings.wolfe_cons_1 = 1e-4;
+    settings.bfgs_settings.wolfe_cons_2 = 0.8;
+
+
+    {
+        //nan
+        settings.iter_max = 20;
+        settings.bfgs_settings.wolfe_cons_1 = 1e-3;
+        settings.bfgs_settings.wolfe_cons_2 = 0.9;
+
+        settings.conv_failure_switch = 1;
+
+    }
+    settings.print_level = 1;
+
+    settings.vals_bound = true;
+
+    settings.lower_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.lower_bounds(0) = -100.0;
+    settings.lower_bounds(1) = 0.0;
+    settings.lower_bounds(2) = -100.0;
+    settings.lower_bounds(3) = 0.0;
+
+    settings.lower_bounds(4) = -100.0;
+    settings.lower_bounds(5) = 0.0;
+    settings.upper_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.upper_bounds(0) = 100.0;
+    settings.upper_bounds(1) = 1.0;
+    settings.upper_bounds(2) = 100.0;
+    settings.upper_bounds(3) = 1.0;
+
+    settings.upper_bounds(4) = 100.0;
+    settings.upper_bounds(5) = 1.0;
+    CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
+
+    opt_fn_obj.weight = std::vector<float>{0.02*0.02,0.1,1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+    opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+
+    {
+        //nan
+        opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.00001, 0.02, 0.02};
+
+    }
+    bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
+
+    if (success) {
+        std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
+    } else {
+        std::cout << "bfgs: reverse-mode autodiff test completed unsuccessfully.\n" << std::endl;
+    }
+
+    std::cout << "solution: x = \n" << x << std::endl;
+
+
+    float curve = 0.0;
+    float dist = 0.0;
+    int N= 30;
+    float dist_inc = x(1)/float(N);
+    transform::Transform2d next_pose;
+
+    dist = 0.0;
+    curve= x(0);
+    dist_inc = x(1)/float(N);
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+//        plotTransform2d(next_pose,"blue");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(0), x(1));
+//    plotTransform2d(robot_init_pose,"red");
+    dist = 0.0;
+    curve= x(2);
+    dist_inc = x(3)/float(N);
+
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+//        plotTransform2d(next_pose,"black");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(2), x(3));
+//    plotTransform2d(robot_init_pose,"red");
+
+    dist = 0.0;
+    curve= x(4);
+    dist_inc = x(5)/float(N);
+
+    for(int i = 0; i < N; i++){
+        next_pose = updateCurveDIst(robot_init_pose, curve, dist);
+//        plotTransform2d(next_pose,"blue");
+        dist += dist_inc;
+    }
+    robot_init_pose = updateCurveDIst(robot_init_pose, x(4), x(5));
+    PLOGD<<   "final robot_init_pose  = \n" << robot_init_pose << std::endl;
+
+    return x;
+//    plotTransform2d(robot_init_pose,"red");
+
+//    matplot::ylim({-2, +2});
+//    matplot::xlim({-3, +1});
+
+
+}
+
+
+void solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const transform::Transform2d& target_pose,Eigen::VectorXd& optim_param){
+
+
+
+
+    size_t optim_param_num = 6;
+    Eigen::VectorXd x(optim_param_num);
+    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+    optim::algo_settings_t settings;
+    settings.iter_max = 20;
+    settings.bfgs_settings.wolfe_cons_1 = 1e-3;
+    settings.bfgs_settings.wolfe_cons_2 = 0.9;
+
+    settings.conv_failure_switch = 1;
+
+
+
+    settings.print_level = 1;
+
+    settings.vals_bound = true;
+
+    settings.lower_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.lower_bounds(0) = -100.0;
+    settings.lower_bounds(1) = 0.05;
+    settings.lower_bounds(2) = -100.0;
+    settings.lower_bounds(3) = 0.05;
+
+    settings.lower_bounds(4) = -100.0;
+    settings.lower_bounds(5) = 0.05;
+    settings.upper_bounds = optim::ColVec_t::Zero(optim_param_num);
+    settings.upper_bounds(0) = 100.0;
+    settings.upper_bounds(1) = 1.0;
+    settings.upper_bounds(2) = 100.0;
+    settings.upper_bounds(3) = 1.0;
+
+    settings.upper_bounds(4) = 100.0;
+    settings.upper_bounds(5) = 1.0;
+    CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
+
+    opt_fn_obj.weight = std::vector<float>{0.02*0.02,0.1,1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+    opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.00001, 0.02, 0.02};
+
+    bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
+//    bool success = optim::gd(x, opt_fn_obj, nullptr,settings);
+//    bool success = optim::lbfgs(x, opt_fn_obj, nullptr,settings);
+
+    if (success) {
+        std::cout << "bfgs: reverse-mode autodiff test completed successfully.\n" << std::endl;
+    } else {
+        std::cout << "bfgs: reverse-mode autodiff test completed unsuccessfully.\n" << std::endl;
+    }
+
+    optim_param = x;
+    std::cout << "solution: x = \n" << x << std::endl;
+
+    transform::Transform2d next_pose = updateCurveDIst(robot_init_pose, x(0), x(1));
+    next_pose = updateCurveDIst(next_pose, x(2), x(3));
+    next_pose = updateCurveDIst(next_pose, x(4), x(5));
+    PLOGD<<   "predict final robot_init_pose  = \n" << next_pose << std::endl;
+
+
+}
 int main(int argc, char** argv){
 
 
-    plog::RollingFileAppender<plog::CsvFormatter> fileAppender("scan_circle.csv", 800000, 10); // Create the 1st appender.
+    plog::RollingFileAppender<plog::CsvFormatter> fileAppender("scan_circle.csv", 10000000, 10); // Create the 1st appender.
     plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender; // Create the 2nd appender.
     plog::init(plog::debug, &fileAppender).addAppender(&consoleAppender); // Initialize the logger with the both appenders.
 
@@ -1028,30 +875,15 @@ int main(int argc, char** argv){
 
     lua.set_exception_handler(&my_exception_handler);
 
+    if(0){
+        test_PathSolver(-2.09607, 0.01467, -0.01799 );
 
-    {
-
-
-//        test_updateCurveDIst();
-        test_PathSolver(-0.8, 0.1, 0.2);
-        test_PathSolver(-0.6, 0.2, 0.2);
-
-        test_PathSolver(-0.8, -0.1, 0.2);
-        test_PathSolver(-0.6, -0.2, 0.2);
-
-
-        test_PathSolver(-0.8, 0.1, -0.3);
-        test_PathSolver(-0.6, 0.2, -0.3);
-
-        test_PathSolver(-0.8, -0.1, -0.3);
-        test_PathSolver(-0.6, -0.2, -0.3);
-
-
-
-        matplot::show();
 
         return 0;
+
     }
+
+
 
     //==== ros
     ros::init(argc, argv, "scan_matching");
@@ -1069,8 +901,8 @@ int main(int argc, char** argv){
 
 
     // target in base_frame
-    // x, y, yaw, init_radius, track_radius
-    std::vector<float> detect_target_relative_pose{0.0,0.0,0.0,0.0,0.0};
+    // x, y, yaw, init_radius, track_radius, range_offset_radius
+    std::vector<float> detect_target_relative_pose{0.0,0.0,0.0,0.0,0.0,0.0};
     const char* detect_target_relative_pose_param = "detect_target_relative_pose";
 
 
@@ -1233,11 +1065,14 @@ int main(int argc, char** argv){
     float split_dist_x = 0.08;
     float split_dist_y = 0.08;
     float split_dist_r = 0.05;
+    float shadow_angle = M_PI_2 - 0.05;
+
 
     int min_point_num_in_seg = 10;
     const char* split_dist_x_param = "split_dist_x";
     const char* split_dist_y_param = "split_dist_y";
     const char* split_dist_r_param = "split_dist_r";
+    const char* shadow_angle_param = "shadow_angle";
 
     const char* min_point_num_in_seg_param = "min_point_num_in_seg";
 
@@ -1384,7 +1219,7 @@ int main(int argc, char** argv){
         nh_private.getParam(shelf_len_y_x_param, shelf_len_y_x);
         shelf_len_y_x_real = shelf_len_y_x;
 
-        if(detect_target_relative_pose.size() != 5 ){
+        if(detect_target_relative_pose.size() != 6 ){
             std::cerr << "detect_target_relative_pose size error"<< std::endl;
             return -1;
         }
@@ -1459,6 +1294,8 @@ int main(int argc, char** argv){
         nh_private.getParam(scan_point_jump_param, scan_point_jump);
         nh_private.getParam(scan_noise_angle_param, scan_noise_angle);
 
+
+        nh_private.getParam(shadow_angle_param, shadow_angle);
 
         nh_private.getParam(filer_angle_min_param, filer_angle_min);
         nh_private.getParam(filer_angle_max_param, filer_angle_max);
@@ -1581,6 +1418,8 @@ int main(int argc, char** argv){
 
     visualization_msgs::MarkerArray marker_array_msg;
     visualization_msgs::Marker  marker_msg;
+    visualization_msgs::Marker  marker_arrow_msg;
+
     marker_msg.header.frame_id = "base_link";//fixed_frame;
     marker_msg.type = visualization_msgs::Marker::CYLINDER;
     marker_msg.action = visualization_msgs::Marker::ADD;
@@ -1589,14 +1428,25 @@ int main(int argc, char** argv){
     marker_msg.scale.y = 2*circle_radius;
     marker_msg.scale.z = 2*circle_radius;
     marker_msg.header.stamp = ros::Time();
-    marker_msg.color.a = 0.5; // Don't forget to set the alpha!
+    marker_msg.color.a = 0.1; // Don't forget to set the alpha!
     marker_msg.color.r = 0.0;
     marker_msg.color.g = 1.0;
     marker_msg.color.b = 0.0;
+
+    marker_arrow_msg.header.frame_id = "base_link";//fixed_frame;
+    marker_arrow_msg.type = visualization_msgs::Marker::ARROW;
+    marker_arrow_msg.action = visualization_msgs::Marker::ADD;
+    marker_arrow_msg.pose.orientation.w = 1.0;
+    marker_arrow_msg.scale.x = 0.1;
+    marker_arrow_msg.scale.y = 0.005;
+    marker_arrow_msg.scale.z = 0.005;
+    marker_arrow_msg.header.stamp = ros::Time();
+    marker_arrow_msg.color.a = 0.7; // Don't forget to set the alpha!
+    marker_arrow_msg.color.r = 0.0;
+    marker_arrow_msg.color.g = 1.0;
+    marker_arrow_msg.color.b = 0.0;
+
     marker_array_msg.markers.resize(1,marker_msg);
-
-
-
 
     std::vector<float> points_in_base(500);
 
@@ -1685,6 +1535,9 @@ int main(int argc, char** argv){
             } catch (tf::TransformException &ex) {
                 ROS_ERROR("%s", ex.what());
             }
+            scan_get_data = false;
+
+
 
             PLOGD << "tf_base_laser: " <<  tf_base_laser << std::endl;
 
@@ -1704,13 +1557,26 @@ int main(int argc, char** argv){
             if(std::strcmp(mode.c_str(), MODE_CIRCLE) == 0){
 
 //                LaserScanBoxFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,box_filter_min_x,box_filter_max_x,box_filter_min_y,box_filter_max_y );
+//                detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3]
+                float search_radius =
+                        (!first_detect_ok)?
+                        detect_target_relative_pose[3]
+                        +
+                        detect_target_relative_pose[5]*sqrt(detect_target_relative_pose[0]*detect_target_relative_pose[0] + detect_target_relative_pose[1]*detect_target_relative_pose[1])
+                                          : detect_target_relative_pose[4];
 
-                LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num, detect_target_relative_pose[0],detect_target_relative_pose[1],
 
-                                      detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+                PLOGD << "first_detect_ok : " << first_detect_ok <<std::endl;
+
+                PLOGD << "check search_radius : " << search_radius << std::endl;
 
 
-                PLOGD << "filter_point_num: " << filter_point_num << std::endl;
+                perception::LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num, detect_target_relative_pose[0],detect_target_relative_pose[1],
+
+                                                  search_radius);
+
+
+                PLOGD << "after LaserScanRadiusFilter filter_point_num: " << filter_point_num << std::endl;
 #if 0
                 for(int i = 0; i < filter_point_num;i++){
                 std::cout << "** "<< i << ", " << filter_points_laser[i].x << ", " << filter_points_laser[i].y  <<"\n";
@@ -1718,15 +1584,61 @@ int main(int argc, char** argv){
             }
 #endif
 
-                LaserScanSegment(filter_points_laser,circle_filter_points_segments, filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
+                perception::LaserScanSegment(filter_points_laser,circle_filter_points_segments, filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg, shadow_angle);
+                PLOGD << "LaserScanSegment circle_filter_points_segments.size() " << circle_filter_points_segments.size()<< std::endl;
+
+                PLOGD << "LaserScanSegment cloud_filtered_points.size() " << cloud_filtered_points.size()<< std::endl;
+
 
 
                 std::vector<geometry::DetectTarget> find_result(circle_filter_points_segments.size());
+                PLOGD << "FindCircle circle_filter_points_segments.size() " << circle_filter_points_segments.size()<< std::endl;
+                PLOGD << "FindCircle check max_fit_error " << max_fit_error << std::endl;
+
+                marker_array_msg.markers[0].header.stamp = scan_time;
+//                marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
+                marker_array_msg.markers[0].pose.position.x =detect_target_relative_tf.x();
+                marker_array_msg.markers[0].pose.position.y =detect_target_relative_tf.y();
+                marker_array_msg.markers[0].id = 1;
+                marker_array_msg.markers[0].scale.x = 2*search_radius;
+                marker_array_msg.markers[0].scale.y = 2*search_radius;
+                marker_array_msg.markers[0].scale.z = 2*search_radius;
+                marker_array_msg.markers[0].color.r = 0.0;
+                marker_array_msg.markers[0].color.g = 1.0;
+                marker_array_msg.markers[0].color.b = 0.0;
+
+
                 for(int i = 0 ; i <circle_filter_points_segments.size(); i++ ){
-                    FindCircle(circle_filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
+                    PLOGD << "FindCircle"<< std::endl;
+
+                   perception::FindCircle(circle_filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
+//                   perception::FindCirclePcl(circle_filter_points_segments[i], circle_radius,circle_edge_radius,circle_edge_range_offset, circle_min_point_num ,find_result[i].pose_in_laser[0],find_result[i].pose_in_laser[1],find_result[i].match_error);
+
                     tf_base_laser.mul(find_result[i].pose_in_laser, 1, find_result[i].pose_in_base);
+                    PLOGD << "FindCircle done, match_error " << find_result[i].match_error << std::endl;
+                    PLOGD << "FindCircle done, center_in_laser " << find_result[i].pose_in_laser[0] << ", " << find_result[i].pose_in_laser[1] << std::endl;
+                    PLOGD << "FindCircle done, center_in_laser " << find_result[i].pose_in_base[0] << ", " << find_result[i].pose_in_base[1] << std::endl;
+
+                    if(find_result[i].match_error < max_fit_error){
+                        cloud_filtered_points.insert(cloud_filtered_points.end(), circle_filter_points_segments[i].begin(),circle_filter_points_segments[i].end());
+
+                    }
 
                 }
+
+                if(!cloud_filtered_points.empty()){
+
+                    PLOGD << "create pointcloud"<< std::endl;
+                    sensor::LaserScanToPointCloud2(cloud_filtered_points,cloud_filtered_points.size(),cloud_filtered_msg);
+                    cloud_filtered_msg.header.stamp = scan_time;
+                    cloud_filtered_msg.header.frame_id.assign(laser_frame);
+
+                    cloud_filtered_pub.publish(cloud_filtered_msg);
+                    PLOGD << "create pointcloud done"<< std::endl;
+
+                }
+
+
 
 
 
@@ -1738,7 +1650,12 @@ int main(int argc, char** argv){
                 }else{
                     std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
                         return (std::abs(v1.pose_in_base[0])+std::abs(v1.pose_in_base[1])) < ( std::abs(v2.pose_in_base[0]) + std::abs(v2.pose_in_base[1]));
+
                     });
+                    std::sort(find_result.begin(),find_result.end(),[](auto& v1,auto& v2){
+                        return  v1.match_error < v2.match_error;
+                    });
+
                     while(find_result[best_result_id].match_error > max_fit_error){
 
                         best_result_id++;
@@ -1754,6 +1671,8 @@ int main(int argc, char** argv){
 
                     if(!detect_target_absolute_pose_computed){
                         PLOGD << "find circle fail " << std::endl;
+                        cloud_target_pub.publish(marker_array_msg);
+
                         continue;
                     }else{
                         if(tf_get_odom_base){
@@ -1766,8 +1685,31 @@ int main(int argc, char** argv){
                     }
                 }else{
 
+                    PLOGD << "find best_result_id " << best_result_id <<std::endl;
+
 
                     geometry::DetectTarget best_result = find_result[best_result_id];
+
+                    PLOGD << "find best_result.pose_in_laser  " << best_result.pose_in_laser[0] << ", " << best_result.pose_in_laser[1]  <<std::endl;
+
+
+                    marker_array_msg.markers.resize(2);
+
+                    marker_array_msg.markers[1] = marker_array_msg.markers[0];
+                    marker_array_msg.markers[1].pose.position.x = best_result.pose_in_base[0];
+                    marker_array_msg.markers[1].pose.position.y = best_result.pose_in_base[1];
+
+
+                    marker_array_msg.markers[1].scale.x = 2*circle_radius;
+                    marker_array_msg.markers[1].scale.y = 2*circle_radius;
+                    marker_array_msg.markers[1].scale.z = 2*circle_radius;
+                    marker_array_msg.markers[1].id = 2;
+                    marker_array_msg.markers[1].color.r = 1.0;
+                    marker_array_msg.markers[1].color.g = 0.0;
+                    marker_array_msg.markers[1].color.b = 0.0;
+
+                    cloud_target_pub.publish(marker_array_msg);
+
 
                     detect_target_relative_tf.set(best_result.pose_in_base[0] , best_result.pose_in_base[1], std::atan2(best_result.pose_in_base[1],best_result.pose_in_base[0]));
                     if(tf_get_odom_base){
@@ -1792,13 +1734,6 @@ int main(int argc, char** argv){
                 detect_target_relative_pose[1] = detect_target_relative_tf.y();
 
 
-                marker_array_msg.markers[0].header.stamp = scan_time;
-//                marker_array_msg.markers[0].header.frame_id.assign(laser_frame);
-                marker_array_msg.markers[0].pose.position.x =detect_target_relative_tf.x();
-                marker_array_msg.markers[0].pose.position.y =detect_target_relative_tf.y();
-                marker_array_msg.markers[0].id = 1;
-
-                cloud_target_pub.publish(marker_array_msg);
 
 
 
@@ -1894,15 +1829,26 @@ int main(int argc, char** argv){
 
                     tf_base_laser_inv.mul(shelf_leg_base_pose[i].pose_in_base, 1, shelf_leg_base_pose[i].pose_in_laser);
 
+                    float search_radius =
+                            (!first_detect_ok)?
+                            detect_target_relative_pose[3]
+                            +
+                            detect_target_relative_pose[5]*sqrt(shelf_leg_base_pose[i].pose_in_base[0]*shelf_leg_base_pose[i].pose_in_base[0] + shelf_leg_base_pose[i].pose_in_base[1]*shelf_leg_base_pose[i].pose_in_base[1])
+: detect_target_relative_pose[4];
 
-                    LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,
-                                          shelf_leg_base_pose[i].pose_in_base[0],shelf_leg_base_pose[i].pose_in_base[1],
 
-                                          detect_target_absolute_pose_computed? detect_target_relative_pose[4] : detect_target_relative_pose[3] );
+                    PLOGD << "first_detect_ok : " << first_detect_ok <<std::endl;
+
+                    PLOGD << "check search_radius : " << search_radius << std::endl;
+
+
+                    perception::LaserScanRadiusFilter(scan_handler.local_xy_points, points_in_base, scan_handler.range_valid_num, filter_points_laser,filter_points_base, filter_point_num,
+                                          shelf_leg_base_pose[i].pose_in_base[0],shelf_leg_base_pose[i].pose_in_base[1],search_radius
+);
                     PLOGD << "check filter_points_laser size : " << filter_points_laser.size() << std::endl;
                     PLOGD << "check filter_point_num : " << filter_point_num << std::endl;
 
-                    LaserScanSegment(filter_points_laser,shelf_filter_points_segments[i], filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
+                    perception::LaserScanSegment(filter_points_laser,shelf_filter_points_segments[i], filter_point_num,split_dist_x, split_dist_y, split_dist_r, min_point_num_in_seg);
 
 
 
@@ -1938,6 +1884,9 @@ int main(int argc, char** argv){
 //                    marker_array_msg.markers[i].scale.y = marker_array_msg.markers[i].scale.x;
 
 //                    marker_array_msg.markers[i].header.frame_id.assign(laser_frame);
+                    marker_array_msg.markers[i].scale.x = 2*search_radius;
+                    marker_array_msg.markers[i].scale.y = 2*search_radius;
+                    marker_array_msg.markers[i].scale.z = 2*search_radius;
                     marker_array_msg.markers[i].pose.position.x = shelf_leg_base_pose[i].pose_in_base[0];
                     marker_array_msg.markers[i].pose.position.y = shelf_leg_base_pose[i].pose_in_base[1];
                     marker_array_msg.markers[i].id = i;
@@ -1976,8 +1925,18 @@ int main(int argc, char** argv){
 
                     float best_edge_12 = 1000.0;
                     int best_edge_id = -1;
+
+                    auto& model_leg1 = shelf_leg_base_pose[0];
+                    auto& model_leg2 = shelf_leg_base_pose[1];
+                    auto& model_leg3 = shelf_leg_base_pose[2];
+                    auto& model_leg4 = shelf_leg_base_pose[3];
+                    float model_edge_12 = std::sqrt( (model_leg2.pose_in_laser[0] - model_leg1.pose_in_laser[0])*(model_leg2.pose_in_laser[0] - model_leg1.pose_in_laser[0]) +  (model_leg2.pose_in_laser[1] - model_leg1.pose_in_laser[1])*(model_leg2.pose_in_laser[1] - model_leg1.pose_in_laser[1])   );
+                    float model_edge_13 = std::sqrt( (model_leg3.pose_in_laser[0] - model_leg1.pose_in_laser[0])*(model_leg3.pose_in_laser[0] - model_leg1.pose_in_laser[0]) +  (model_leg3.pose_in_laser[1] - model_leg1.pose_in_laser[1])*(model_leg3.pose_in_laser[1] - model_leg1.pose_in_laser[1])   );
+
                     //
                     if(!first_detect_ok){
+
+
 
 
                         while(best_result_id < shelf_leg_match_result.size()){
@@ -2027,8 +1986,8 @@ int main(int argc, char** argv){
                                     edge_12, edge_13 , edge_34 ,edge_24,angle31,angle42 ,angle21,angle43, rect_angle1, rect_angle2, rect_angle3, rect_angle4);
                             PLOGD << msg << std::endl;
 
-                            bool valid = std::abs(edge_12 - edge_34) <  shelf_rect_diff[0]
-                                    && std::abs(edge_13 - edge_24) <  shelf_rect_diff[1]
+                            bool valid = std::abs(edge_12 - edge_34) <  shelf_rect_diff[0] && edge_12 > shelf_rect_diff[0] && edge_34 > shelf_rect_diff[0]
+                                    && std::abs(edge_13 - edge_24) <  shelf_rect_diff[1] && edge_13 > shelf_rect_diff[1] && edge_24 > shelf_rect_diff[1]
                                     && std::abs(rect_angle1 - M_PI_2) < shelf_rect_diff[2]
                                     && std::abs(rect_angle2 - M_PI_2) < shelf_rect_diff[2]
                                     && std::abs(rect_angle3 - M_PI_2) < shelf_rect_diff[2]
@@ -2038,14 +1997,20 @@ int main(int argc, char** argv){
 
                                     ;
 
+                            float dist = std::sqrt( (model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0])*(model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0]) +  (model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])*(model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])   );
+
+
+                            float cost = std::abs(edge_12 - model_edge_12)
+                                    + std::abs(edge_13 - model_edge_13)
+                                    + dist;
 
 
                             result.back() = 500.0f*(std::abs(edge_12 - edge_34) + std::abs(edge_13 - edge_24));
                             if(valid){
 
-                                if(edge_12 < best_edge_12){
+                                if(cost < best_edge_12){
 
-                                    best_edge_12 = edge_12;
+                                    best_edge_12 = cost;
                                     best_edge_id = best_result_id;
 
                                     PLOGD << "get valid rect, write to file" << std::endl;
@@ -2082,11 +2047,20 @@ int main(int argc, char** argv){
                             PLOGD << "check match result: " << result[0] << ", " << result[1] << ", " << result[2] << ", " << result[3] << std::endl;
                             auto& detect_leg1 = shelf_leg_front_pose[0][result[0]];
                             auto& detect_leg2 = shelf_leg_front_pose[1][result[1]];
+
+
                             float edge_12 = std::sqrt( (detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0])*(detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) +  (detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])*(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1])   );
 
-                            if(edge_12 < best_edge_12){
 
-                                best_edge_12 = edge_12;
+
+                            float dist = std::sqrt( (model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0])*(model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0]) +  (model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])*(model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])   );
+
+
+                            float cost = std::abs(edge_12 - model_edge_12) + dist;
+
+                            if(cost < best_edge_12){
+
+                                best_edge_12 = cost;
                                 best_edge_id = best_result_id;
 
                             }
@@ -2105,7 +2079,6 @@ int main(int argc, char** argv){
                 }
 
 
-                cloud_target_pub.publish(marker_array_msg);
 
 
                 if(detect_target_absolute_pose_computed && detect_target_stop_update){
@@ -2121,6 +2094,8 @@ int main(int argc, char** argv){
                         detect_results_msg.header.frame_id.assign(laser_frame);
 
                         detect_results_pub.publish(detect_results_msg);
+                        cloud_target_pub.publish(marker_array_msg);
+
                         continue;
                     }else{
                         if(tf_get_odom_base){
@@ -2134,6 +2109,7 @@ int main(int argc, char** argv){
 
                     // check matched legs
                     auto& best_result = shelf_leg_match_result[best_result_id];
+                    PLOGD << "check match best_result: " << best_result[0] << ", " << best_result[1] << ", " << best_result[2] << ", " << best_result[3] << std::endl;
 
                     auto& detect_leg1 = shelf_leg_front_pose[0][best_result[0]];
                     auto& detect_leg2 = shelf_leg_front_pose[1][best_result[1]];
@@ -2142,11 +2118,9 @@ int main(int argc, char** argv){
 
 
                     PLOGD << "check two leg" << std::endl;
-                    PLOGD << shelf_leg_base_pose[0].pose_in_base[0] << ", " << shelf_leg_base_pose[0].pose_in_base[1] << ", " << shelf_leg_base_pose[0].pose_in_laser[0] << ", " << shelf_leg_base_pose[0].pose_in_laser[1] << std::endl;
-                    PLOGD << shelf_leg_base_pose[1].pose_in_base[0] << ", " << shelf_leg_base_pose[1].pose_in_base[1] << ", " << shelf_leg_base_pose[1].pose_in_laser[0] << ", " << shelf_leg_base_pose[1].pose_in_laser[1] << std::endl;
 
-                    PLOGD << detect_leg1.pose_in_base[0] << ", " << detect_leg1.pose_in_base[1] << ", " << detect_leg1.pose_in_laser[0] << ", " << detect_leg1.pose_in_laser[1] << std::endl;
-                    PLOGD << detect_leg2.pose_in_base[0] << ", " << detect_leg2.pose_in_base[1] << ", " << detect_leg2.pose_in_laser[0] << ", " << detect_leg2.pose_in_laser[1] << std::endl;
+                    PLOGD << "detect_leg1: " <<  detect_leg1.pose_in_base[0] << ", " << detect_leg1.pose_in_base[1] << std::endl;
+                    PLOGD << "detect_leg2: " <<  detect_leg2.pose_in_base[0] << ", " << detect_leg2.pose_in_base[1] << std::endl;
 
 
 
@@ -2155,6 +2129,9 @@ int main(int argc, char** argv){
 
                     math::yaw_to_quaternion(std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + M_PI_2,
                                             target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
+                    PLOGD << "target_pose: " << target_pose.position.x << ", " << target_pose.position.y << std::endl;
+
+
 
                     detect_results_msg.poses.emplace_back(target_pose);
 
@@ -2163,7 +2140,6 @@ int main(int argc, char** argv){
                                                   0.5*(detect_leg1.pose_in_base[1] + detect_leg2.pose_in_base[1]),
                                                   std::atan2(detect_leg2.pose_in_base[1] - detect_leg1.pose_in_base[1]  ,detect_leg2.pose_in_base[0] - detect_leg1.pose_in_base[0]) + M_PI_2
                                                   );
-
 
                     if(tf_get_odom_base){
                         detect_target_absolute_pose_computed = true;
@@ -2199,6 +2175,96 @@ int main(int argc, char** argv){
                 control_target_in_shelf[0] = -interpolate_distance;
                 detect_target_relative_tf.mul(control_target_in_shelf, 1, control_interpolate_target_in_base);
                 PLOGD << "interpolate control_interpolate_target_in_base: " << control_interpolate_target_in_base[0]<<", " << control_interpolate_target_in_base[1] << std::endl;
+
+
+
+                {
+                    PLOGD << "start optim" << std::endl;
+                    transform::Transform2d opt_target_pose;
+                    transform::Transform2d opt_init_pose =detect_target_relative_tf.inverse() ;
+
+                    std::cout << "opt_init_pose: = \n" << opt_init_pose << std::endl;
+                    std::cout << "opt_target_pose: = \n" << opt_target_pose << std::endl;
+
+                    size_t optim_param_num = 6;
+                    Eigen::VectorXd x(optim_param_num);
+                    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+//                    solve_curve_path_plan(opt_init_pose,opt_target_pose, x );
+                    x = test_PathSolver(opt_init_pose.x(),opt_init_pose.y(),opt_init_pose.yaw());
+                    std::cout << "solution: x = \n" << x << std::endl;
+                    float curve = 0.0;
+                    float dist = 0.0;
+                    int N= 10;
+                    float dist_inc = x(1)/float(N);
+                    transform::Transform2d next_pose;
+                    dist = 0.0;
+                    curve= x(0);
+                    dist_inc = x(1)/float(N);
+                    opt_init_pose.set(0.0,0.0,0.0);
+                    for(int i = 0; i < N; i++){
+                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                        dist += dist_inc;
+
+                        marker_arrow_msg.pose.position.x = next_pose.x();
+                        marker_arrow_msg.pose.position.y = next_pose.y();
+                        math::yaw_to_quaternion( next_pose.yaw(),
+                                                marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                        marker_arrow_msg.id = marker_array_msg.markers.size();
+                        marker_arrow_msg.header.stamp = scan_time;
+
+                        marker_array_msg.markers.emplace_back(marker_arrow_msg);
+                    }
+                    opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
+
+                    dist = 0.0;
+                    curve= x(2);
+                    dist_inc = x(3)/float(N);
+                    for(int i = 0; i < N; i++){
+                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                        dist += dist_inc;
+
+                        marker_arrow_msg.pose.position.x = next_pose.x();
+                        marker_arrow_msg.pose.position.y = next_pose.y();
+                        math::yaw_to_quaternion( next_pose.yaw(),
+                                                 marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                        marker_arrow_msg.id = marker_array_msg.markers.size();
+                        marker_arrow_msg.header.stamp = scan_time;
+
+                        marker_array_msg.markers.push_back(marker_arrow_msg);
+                    }
+                    opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
+                    dist = 0.0;
+                    curve= x(4);
+                    dist_inc = x(5)/float(N);
+                    for(int i = 0; i < N; i++){
+                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                        dist += dist_inc;
+
+                        marker_arrow_msg.pose.position.x = next_pose.x();
+                        marker_arrow_msg.pose.position.y = next_pose.y();
+                        math::yaw_to_quaternion( next_pose.yaw(),
+                                                 marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                        marker_arrow_msg.id = marker_array_msg.markers.size();
+                        marker_arrow_msg.header.stamp = scan_time;
+
+                        marker_array_msg.markers.push_back(marker_arrow_msg);
+                    }
+                    opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
+                    PLOGD<<   "predict final opt_init_pose  = \n" << opt_init_pose << std::endl;
+
+
+
+                    marker_arrow_msg.pose.position.x = opt_init_pose.x();
+                    marker_arrow_msg.pose.position.y = opt_init_pose.y();
+                    math::yaw_to_quaternion( opt_init_pose.yaw(),
+                                             marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                    marker_arrow_msg.id = marker_array_msg.markers.size();
+                    marker_arrow_msg.header.stamp = scan_time;
+
+                    marker_array_msg.markers.push_back(marker_arrow_msg);
+                }
+                cloud_target_pub.publish(marker_array_msg);
 
 
                 sensor::LaserScanToPointCloud2(cloud_filtered_points,cloud_filtered_points.size(),cloud_filtered_msg);
@@ -2314,7 +2380,6 @@ int main(int argc, char** argv){
 
 
 
-            scan_get_data = false;
 
         }else{
             suspend.sleep(sleep_time);

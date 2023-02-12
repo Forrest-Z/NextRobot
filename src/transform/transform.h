@@ -10,6 +10,7 @@
 #include <iostream>
 
 namespace transform{
+
     struct Transform2d{
 
         std::array<std::array<float,3>,3> matrix;
@@ -273,5 +274,70 @@ namespace transform{
 
         return out;
     }
+
+
+    template<typename FloatType>
+    struct MatrixSE2{
+        std::array<std::array<FloatType,3>,3> matrix;
+        MatrixSE2(FloatType x = 0.0, FloatType y = 0.0, FloatType yaw = 0.0){
+            set(x,y,yaw);
+        }
+
+        MatrixSE2(const Transform2d& rhv){
+            set(rhv.x(),rhv.y(),rhv.yaw());
+        }
+
+        FloatType x() const {
+            return matrix[0][2];
+        }
+        FloatType y() const {
+            return matrix[1][2];
+        }
+        FloatType yaw() const {
+            return atan2(matrix[1][0],matrix[0][0]);
+        }
+        void set(FloatType x, FloatType y, FloatType yaw){
+            matrix[0][0] = cos(yaw);
+            matrix[0][1]  = -sin(yaw);
+            matrix[1][0] = sin(yaw);
+            matrix[1][1]  = cos(yaw);
+
+            matrix[0][2]  = x;
+            matrix[1][2]  = y;
+
+            matrix[2][0]  = 0.0;
+            matrix[2][1]  = 0.0;
+            matrix[2][2]  = 1.0;
+        }
+
+        MatrixSE2<FloatType> operator*(const MatrixSE2<FloatType>& rhv)const{
+            MatrixSE2<FloatType> result;
+
+            auto& a = this->matrix;
+            auto& b = rhv.matrix;
+            auto& c = result.matrix;
+            // Calculate the j-th column of the result in-place (in B) using the helper array
+
+//            std::cout << "check matrix mul:\n";
+            for(int i=0 ; i<3 ; i++)
+            {
+                for(int j=0 ; j<3 ; j++)
+                {
+
+                    c[i][j]=0;
+                    for(int k=0 ; k<3 ; k++)
+                    {
+//                        std::cout <<" [ " <<  a[i][k] << " * " << b[k][j] << " ] " ;
+                        c[i][j]+=a[i][k]*b[k][j];
+                        //--^-- should be k
+                    }
+//                    std::cout << " = " << c[i][j] << "\n";
+
+                }
+            }
+            return result;
+        }
+    };
+
 }
 #endif //SCAN_REPUBLISHER_TRANSFORM_H

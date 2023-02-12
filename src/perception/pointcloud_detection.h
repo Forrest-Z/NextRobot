@@ -29,6 +29,8 @@ namespace perception{
 
     void FindFrontEdge(std::vector<geometry::Point>& points,float radius, int min_point_num, float & center_x, float & center_y, float& error_mean){
 
+        center_x = 100000.0;
+        center_y = 100000.0;
         if(points.size() < min_point_num){
             std::cout << "check points.size() fail return : " << points.size()  << std::endl;
 
