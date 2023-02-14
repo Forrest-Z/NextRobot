@@ -829,7 +829,7 @@ public:
                 m_surface_tree->setInputCloud(cloud_reference);
 
                 pcl::PointNormal searchPoint;
-                float radius = 0.2;
+                float radius = m_icp_config.max_match_distance;
 
                 std::vector<int> pointIdxRadiusSearch;
                 std::vector<float> pointRadiusSquaredDistance;
@@ -839,6 +839,7 @@ public:
 //                std::set<int> removed_idx,removed_idx_input;
 
                 int match_num = 0;
+                int valid_num = 0;
                 for(int i = 0; i < point_num;i++){
                     searchPoint = cloud_align->at(i);
 
@@ -846,6 +847,7 @@ public:
                     if ( m_surface_tree->radiusSearch (searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0 )
                     {
 
+                        valid_num ++;
                         std::sort(pointRadiusSquaredDistance.begin(),pointRadiusSquaredDistance.end());
                         if(pointRadiusSquaredDistance.front() < 0.005){
                             match_num++;
@@ -858,18 +860,21 @@ public:
 
                 }
 
-                float match_ratio_reading = float(match_num)/float(point_num);
-                float match_ratio_reference = float(match_num)/float(cloud_reference->size());
 
 
-                if( (match_ratio_reading < m_error_rejection_config.match_ratio) || (match_ratio_reference < m_error_rejection_config.match_ratio) ){
+                if(valid_num == 0
+                || match_num == 0
+                       ||  (float(match_num)/float(valid_num) < m_error_rejection_config.match_ratio)
+//                || (match_ratio_reference < m_error_rejection_config.match_ratio)
+                )
+                {
 
                     is_icp_fault = true;
                     sensor_absolute_pose = sensor_absolute_pose_last;
 
                     PLOGD << "icp sensor_absolute_pose_change : " << sensor_absolute_pose_change  << std::endl;
 
-                    PLOGD <<"match_num: "<< match_num << ", point_num: " << point_num << ", match_ratio_reading: " << match_ratio_reading << ", match_ratio_reference: "<< match_ratio_reference<< std::endl;
+                    PLOGD <<"match_num: "<< match_num << ", valid_num: " << valid_num <<  std::endl;
 
                     PLOGD << "icp fault will reset " << std::endl;
 
@@ -1081,10 +1086,10 @@ public:
         }
     }
 
-    void setRobotAbsolutePoseInitIcp(const transform::Transform2d &t) {
+    void setRobotAbsolutePoseInitIcp(const transform::Transform2d &t, bool force = false) {
 //        PLOGD<< "is_sensor_pose_set " << is_sensor_pose_set << " is_origin_computed " << is_origin_computed << " is_icp_init " << is_icp_init <<std::endl;
 
-        if (is_sensor_pose_set &&  is_origin_computed && !is_icp_init) {
+        if (is_sensor_pose_set &&  is_origin_computed && (!is_icp_init || force)) {
             robot_absolute_pose = t;
             robot_relative_pose = origin.inverse() * robot_absolute_pose;
 
@@ -1215,10 +1220,16 @@ int main(int argc, char **argv) {
     const char* loc_and_map_param = "loc_and_map";
 
 
+    bool tf_broadcast = false;
+    const char* tf_broadcast_param = "tf_broadcast";
+
+
     const char* dump_data_param = "dump_data";
     bool dump_data = false;
 
 
+    int max_robot_pose_array_num = 1000;
+    const char* max_robot_pose_array_num_param = "max_robot_pose_array_num";
 
 
     bool wait_extern_pose = true;
@@ -1316,9 +1327,16 @@ int main(int argc, char **argv) {
         nh_private.getParam(loc_and_map_param, loc_and_map);
 
 
+        nh_private.getParam(tf_broadcast_param, tf_broadcast);
+
+
         nh_private.getParam(sleep_time_param, sleep_time);
 
         nh_private.getParam(tf_wait_time_param, tf_wait_time);
+
+
+        nh_private.getParam(max_robot_pose_array_num_param, max_robot_pose_array_num);
+
 
         nh_private.getParam(scan_filter_len_param, scan_filter_len);
         nh_private.getParam(scan_filter_stddev_param, scan_filter_stddev);
@@ -1395,6 +1413,9 @@ int main(int argc, char **argv) {
 
     std::string pose_trj_topic = "robot_pose_array";
 
+    const char* recieved_intiialpose_topic = "initialpose";
+
+
 
     // ==== publisher
     // PointCloud2
@@ -1417,6 +1438,7 @@ int main(int argc, char **argv) {
     robot_pose_array.header.frame_id = "map";
 
 
+    geometry_msgs::PoseWithCovarianceStamped recieved_initialpose;
     geometry_msgs::PoseWithCovarianceStamped initialpose_msg;
     initialpose_msg.header.frame_id = "map";
     initialpose_msg.header.stamp = ros::Time::now();
@@ -1451,99 +1473,10 @@ int main(int argc, char **argv) {
 
     //==== pcl cloud
     pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud_raw(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud_voxel(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud_radius(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr pcl_cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
 
-    pcl::PointCloud<pcl::PointNormal>::Ptr pcl_cloud_norm(new pcl::PointCloud<pcl::PointNormal>);
-    pcl::PointCloud<pcl::PointNormal>::Ptr pcl_cloud_norm_ref(new pcl::PointCloud<pcl::PointNormal>);
 
 
     //==== pcl
-    pcl::RadiusOutlierRemoval<pcl::PointXYZ> radiusOutlierRemoval;
-    pcl::ApproximateVoxelGrid<pcl::PointXYZ> approximateVoxelGrid;
-
-    approximateVoxelGrid.setLeafSize(pcl_voxel_leaf_x, pcl_voxel_leaf_y, pcl_voxel_leaf_z);
-
-    radiusOutlierRemoval.setRadiusSearch(pcl_radius_radius);
-    radiusOutlierRemoval.setMinNeighborsInRadius(pcl_radius_neighbors);
-
-//    radiusOutlierRemoval.setKeepOrganized(false);
-
-
-    // icp
-    pcl::PointCloud<pcl::PointXYZ> Final;
-    pcl::PointCloud<pcl::PointNormal> Final_Norm;
-
-    Eigen::Matrix4f initial_guess(Eigen::Matrix4f::Identity ());
-//    initial_guess(0,3) = 0.03;
-//    initial_guess(1,3) = 0.02;
-
-
-    pcl::IterativeClosestPointNonLinear<PointType, PointType> icp;
-
-    pcl::registration::WarpPointRigid3D<PointType, PointType>::Ptr warp_fcn
-            (new pcl::registration::WarpPointRigid3D<PointType, PointType>);
-
-
-
-    // Create a TransformationEstimationLM object, and set the warp to it
-    pcl::registration::TransformationEstimation2D<PointType, PointType>::Ptr te_2d(
-            new pcl::registration::TransformationEstimation2D<PointType, PointType>);
-
-
-
-    // TransformationEstimationLM with warp_fcn is faster than TransformationEstimation2D
-    pcl::registration::TransformationEstimationLM<PointType, PointType>::Ptr te(
-            new pcl::registration::TransformationEstimationLM<PointType, PointType>);
-    te->setWarpFunction(warp_fcn);
-
-
-    // Pass the TransformationEstimation objec to the ICP algorithm
-    icp.setTransformationEstimation(te);
-
-
-
-//    icp.setMaximumIterations (10);
-//    icp.setMaxCorrespondenceDistance (0.05);
-//    icp.setRANSACOutlierRejectionThreshold (0.05);
-
-
-// pl icp
-    pcl::registration::WarpPointRigid3D<pcl::PointNormal, pcl::PointNormal>::Ptr warp_fcn_pl
-            (new pcl::registration::WarpPointRigid3D<pcl::PointNormal, pcl::PointNormal>);
-    pcl::IterativeClosestPointWithNormals<pcl::PointNormal, pcl::PointNormal> pl_icp;
-
-    pcl::registration::TransformationEstimationPointToPlane<pcl::PointNormal, pcl::PointNormal>::Ptr pl_te(
-            new pcl::registration::TransformationEstimationPointToPlane<pcl::PointNormal, pcl::PointNormal>);
-
-    pl_te->setWarpFunction(warp_fcn_pl);
-    pl_icp.setTransformationEstimation(pl_te);
-
-
-
-    // norm est
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-
-    Normal2dEstimation norm_estim;
-    norm_estim.setSearchMethod(tree);
-    norm_estim.setRadiusSearch(pcl_norm_radius);
-//    norm_estim.setKSearch(5);
-
-
-
-
-// pcl tree
-    float resolution = 0.05;
-
-
-
-    pcl::octree::OctreePointCloudSearch<pcl::PointNormal> octree (resolution);
-
-
-
-    // build the filter
-
 
     // ==== listener
     // LaserScan
@@ -1553,6 +1486,7 @@ int main(int argc, char **argv) {
 
     bool scan_get_data = false;
     bool tf_get_base_laser = false;
+    bool intialpose_get_data = false;
 //    bool tf_get_odom_base = false;
 
     sensor::ScanToPoints scan_handler;
@@ -1625,6 +1559,13 @@ int main(int argc, char **argv) {
 
 
 
+    auto initialpose_cb = [&](const geometry_msgs::PoseWithCovarianceStampedConstPtr &msg){
+
+        intialpose_get_data = true;
+        recieved_initialpose = *msg;
+
+
+    };
     auto laser_cb = [&](const sensor_msgs::LaserScanConstPtr &msg) {
         laser_frame.assign(msg->header.frame_id);
         scan_time = msg->header.stamp;
@@ -1656,7 +1597,7 @@ int main(int argc, char **argv) {
 
         scan_get_data = scan_handler.range_valid_num > 100;
 
-        PLOGD   <<" range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
+//        PLOGD   <<" range_valid_num:" << scan_handler.range_valid_num << ", update_index: " << rangesFilter.update_index << std::endl;
 
 #endif
 
@@ -1664,19 +1605,15 @@ int main(int argc, char **argv) {
     };
 
 
-    ros::Subscriber sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, laser_cb);
+    ros::Subscriber laser_sub = nh.subscribe<sensor_msgs::LaserScan>("scan", 1, laser_cb);
+    ros::Subscriber intialpose_sub = nh.subscribe<geometry_msgs::PoseWithCovarianceStamped>(recieved_intiialpose_topic, 1, initialpose_cb);
+
     nh.setParam(amcl_tf_broadcast, true);
     nh_private.setParam(status_param,0);
 
 
 
-    transform::Transform2d tmp_icp(0.1, 0.05, 0.08);
-    initial_guess(0, 0) = tmp_icp.matrix[0][0];
-    initial_guess(0, 1) = tmp_icp.matrix[0][1];
-    initial_guess(1, 0) = tmp_icp.matrix[1][0];
-    initial_guess(1, 1) = tmp_icp.matrix[1][1];
-    initial_guess(0, 3) = tmp_icp.matrix[0][2];
-    initial_guess(1, 3) = tmp_icp.matrix[1][2];
+
 
 //    tmp_icp = tmp_icp.inverse();
 
@@ -1910,7 +1847,7 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                if (robot_pose_array.poses.size() > 200) {
+                if (robot_pose_array.poses.size() > max_robot_pose_array_num) {
                     robot_pose_array.poses.erase(robot_pose_array.poses.begin(), robot_pose_array.poses.begin() + 100);
                 }
                 robot_pose_array.header.stamp = stamp;
@@ -2147,10 +2084,13 @@ int main(int argc, char **argv) {
 //                    PLOGD << "start scan_time :"<<scan_time<<std::endl;
 
 //                    PLOGD << "start pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
-                    tf_br.sendTransform(pub_map_odom_tf);
+                    if(tf_broadcast){
 
-                    nh.setParam(amcl_tf_broadcast, false);
+                        tf_br.sendTransform(pub_map_odom_tf);
 
+                        nh.setParam(amcl_tf_broadcast, false);
+
+                    }
                     map_odom_tf_computed = true;
                     nh_private.setParam(status_param,2);
 
@@ -2172,6 +2112,7 @@ int main(int argc, char **argv) {
                     start_pub_tf = false;
                     solver_need_reset = true;
                     nh.setParam(amcl_tf_broadcast, true);
+                    nh_private.setParam(status_param,-3);
                     PLOGD << "addTask" << std::endl;
 
                     scan_task_manager.addTask([&]{
@@ -2223,7 +2164,7 @@ int main(int argc, char **argv) {
             if (start_pub_tf && !solver.isIcpFault() ) {
                 auto pub_stamp = ros::Time::now() + transform_tolerance_;
 
-                if(pub_stamp > pub_map_odom_tf.stamp_){
+                if(tf_broadcast && pub_stamp > pub_map_odom_tf.stamp_){
                     pub_map_odom_tf.stamp_ =pub_stamp;
 //                    PLOGD << "2 pub_map_odom_tf.stamp_:"<<pub_map_odom_tf.stamp_<<std::endl;
                     tf_br.sendTransform(pub_map_odom_tf);

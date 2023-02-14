@@ -233,7 +233,9 @@ curve_opt_fnd(const autodiff::ArrayXvar& x,  const transform::Transform2d& curre
 
     transform::MatrixSE2<autodiff::var> init_pose(current_pose );
 
-    transform::MatrixSE2<autodiff::var>next_pose = updateCurveDistDiff(init_pose, x(0),x(1));
+    transform::MatrixSE2<autodiff::var> next_pose_1 = updateCurveDistDiff(init_pose, x(0),x(1));
+    autodiff::var control_first_angle = atan2( -next_pose_1.y(), -next_pose_1.x() );
+
 //    std::cout << "check x " << x << "\n";
 //    std::cout << "check next_pose 1 " << next_pose.x() << ", " << next_pose.y() << ", " << next_pose.yaw() << "\n";
 
@@ -241,7 +243,7 @@ curve_opt_fnd(const autodiff::ArrayXvar& x,  const transform::Transform2d& curre
 //    transform::MatrixSE2<autodiff::var>control_pose = updateCurveDistDiff(init_pose, x(0), x1 );
 
 //    next_pose = updateCurveDistDiff(init_pose, x(2),x(3));
-    next_pose = updateCurveDistDiff(next_pose, x(2),x(3));
+    transform::MatrixSE2<autodiff::var>  next_pose = updateCurveDistDiff(next_pose_1, x(2),x(3));
 //    std::cout << "check next_pose 2 " << next_pose.x() << ", " << next_pose.y() << ", " << next_pose.yaw() << "\n";
 
     next_pose = updateCurveDistDiff(next_pose, x(4),x(5));
@@ -262,12 +264,23 @@ curve_opt_fnd(const autodiff::ArrayXvar& x,  const transform::Transform2d& curre
     r =  dist_error*weight[0]
             + angle_error*weight[1]
             + final_curve*weight[2]
-            + ( roate_angle_1 + roate_angle_2 + roate_angle_3)*weight[3]
+//            + ( roate_angle_1 + roate_angle_2 + roate_angle_3)*weight[3]
+//            + (next_pose_1.x() - 0.8*init_pose.x())*(next_pose_1.x() - 0.8*init_pose.x()) * weight[4]
+//              + ( roate_angle_1 - control_first_angle)*( roate_angle_1 - control_first_angle)*weight[4]
 
 //            + ( (x(5) < 0.2) ? (  (x(5) - 0.2) * (x(5) - 0.2) * weight[4] ) : (x(5) - 0.2) * (x(5) - 0.2)*0.0  )
 //            + 0.1*control_pose.x() *control_pose.x()
             ;
 
+    if( dist_error > 0.5* (init_pose.x()*init_pose.x()  + init_pose.y()*init_pose.y() ) ){
+
+        r +=
+                ( roate_angle_1 - control_first_angle)*( roate_angle_1 - control_first_angle)*weight[3]
+//                + x(0)*x(0)*weight[4]
+
+                ;
+
+    }
 
 
 //    std::cout << "check dist_error x " << next_pose.x() - target_pose.x() << "\n";
@@ -687,9 +700,13 @@ Eigen::VectorXd  test_PathSolver(float init_x, float init_y, float init_yaw){
 
 
 
+    float optim_dist = sqrt(init_x*init_x + init_y*init_y);
     size_t optim_param_num = 6;
+    float optim_dist_step = 0.6*optim_dist/(0.5*float(optim_param_num));
+
     Eigen::VectorXd x(optim_param_num);
-    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+    x << 1e-5, optim_dist_step ,1e-5,optim_dist_step,1e-5,optim_dist_step;
 
     optim::algo_settings_t settings;
     settings.iter_max = 50;
@@ -729,11 +746,11 @@ Eigen::VectorXd  test_PathSolver(float init_x, float init_y, float init_yaw){
     CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
 
     opt_fn_obj.weight = std::vector<float>{0.02*0.02,0.1,1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
-    opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
+    opt_fn_obj.weight = std::vector<float>{1.0, 1.0, 0.2, 0.0001, 0.001, 0.001};
 
     {
         //nan
-        opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.00001, 0.02, 0.02};
+        opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.01, 0.002, 0.002};
 
     }
     bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
@@ -786,7 +803,10 @@ Eigen::VectorXd  test_PathSolver(float init_x, float init_y, float init_yaw){
     }
     robot_init_pose = updateCurveDIst(robot_init_pose, x(4), x(5));
     PLOGD<<   "final robot_init_pose  = \n" << robot_init_pose << std::endl;
+    if(!std::isnormal(x.norm())){
+        PLOGD<<   "optim get nan value" << x << std::endl;
 
+    }
     return x;
 //    plotTransform2d(robot_init_pose,"red");
 
@@ -797,14 +817,21 @@ Eigen::VectorXd  test_PathSolver(float init_x, float init_y, float init_yaw){
 }
 
 
-void solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const transform::Transform2d& target_pose,Eigen::VectorXd& optim_param){
+bool solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const transform::Transform2d& target_pose,Eigen::VectorXd& optim_param){
 
 
 
 
+
+    float optim_dist = sqrt((robot_init_pose.x() -target_pose.x()) *(robot_init_pose.x() -target_pose.x())
+            + (robot_init_pose.y() -target_pose.y())*(robot_init_pose.y() -target_pose.y())  );
     size_t optim_param_num = 6;
+    float optim_dist_step = 0.6*optim_dist/(0.5*float(optim_param_num));
+
     Eigen::VectorXd x(optim_param_num);
-    x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
+
+    x << 1e-5, optim_dist_step ,1e-5,optim_dist_step,1e-5,optim_dist_step;
+
 
     optim::algo_settings_t settings;
     settings.iter_max = 20;
@@ -821,12 +848,12 @@ void solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const 
 
     settings.lower_bounds = optim::ColVec_t::Zero(optim_param_num);
     settings.lower_bounds(0) = -100.0;
-    settings.lower_bounds(1) = 0.05;
+    settings.lower_bounds(1) = 0.00;
     settings.lower_bounds(2) = -100.0;
-    settings.lower_bounds(3) = 0.05;
+    settings.lower_bounds(3) = 0.00;
 
     settings.lower_bounds(4) = -100.0;
-    settings.lower_bounds(5) = 0.05;
+    settings.lower_bounds(5) = 0.00;
     settings.upper_bounds = optim::ColVec_t::Zero(optim_param_num);
     settings.upper_bounds(0) = 100.0;
     settings.upper_bounds(1) = 1.0;
@@ -838,8 +865,12 @@ void solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const 
     CurveCostFunction opt_fn_obj(robot_init_pose,target_pose) ;
 
     opt_fn_obj.weight = std::vector<float>{0.02*0.02,0.1,1.0, 1.0, 0.2, 0.0001, 0.2, 0.2};
-    opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.00001, 0.02, 0.02};
+    opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.00001, 0.001, 0.00001};
+    {
+        //nan
+        opt_fn_obj.weight = std::vector<float>{0.1, 0.1, 0.02, 0.01, 0.002, 0.002};
 
+    }
     bool success = optim::bfgs(x, opt_fn_obj, nullptr,settings);
 //    bool success = optim::gd(x, opt_fn_obj, nullptr,settings);
 //    bool success = optim::lbfgs(x, opt_fn_obj, nullptr,settings);
@@ -858,6 +889,12 @@ void solve_curve_path_plan(const transform::Transform2d& robot_init_pose, const 
     next_pose = updateCurveDIst(next_pose, x(4), x(5));
     PLOGD<<   "predict final robot_init_pose  = \n" << next_pose << std::endl;
 
+    if(!std::isnormal(x.norm())){
+        PLOGD<<   "optim get nan value" << x << std::endl;
+
+        return false;
+    }
+    return true;
 
 }
 int main(int argc, char** argv){
@@ -1419,6 +1456,7 @@ int main(int argc, char** argv){
     visualization_msgs::MarkerArray marker_array_msg;
     visualization_msgs::Marker  marker_msg;
     visualization_msgs::Marker  marker_arrow_msg;
+    std::vector<visualization_msgs::Marker> marker_arrow_msg_array;
 
     marker_msg.header.frame_id = "base_link";//fixed_frame;
     marker_msg.type = visualization_msgs::Marker::CYLINDER;
@@ -1464,6 +1502,8 @@ int main(int argc, char** argv){
 
 
     bool first_detect_ok = false;
+    bool curve_path_computed = false;
+    std::vector<transform::Transform2d> control_path_pose_array;
 
     auto pending_task = [&]{
         run_command_last = run_command;
@@ -1472,12 +1512,14 @@ int main(int argc, char** argv){
     auto restart_task = [&]{
         run_command_last = run_command;
         first_detect_ok = false;
+        curve_path_computed = false;
         detect_target_absolute_pose_computed = false;
         detect_target_stop_update = false;
         start_run = load_params();
         control_finished_cnt = 0;
         rotate_pid.reset();
         forward_pid.reset();
+        control_path_pose_array.clear();
 
     };
 
@@ -1855,7 +1897,7 @@ int main(int argc, char** argv){
                     shelf_leg_front_pose[i].resize(shelf_filter_points_segments[i].size());
                     for(int j = 0 ; j < shelf_filter_points_segments[i].size();j++){
 
-                        perception::FindFrontEdge(shelf_filter_points_segments[i][j],front_min_num, front_radius ,shelf_leg_front_pose[i][j].pose_in_laser[0], shelf_leg_front_pose[i][j].pose_in_laser[1],shelf_leg_front_pose[i][j].match_error );
+                        perception::FindFrontEdge(shelf_filter_points_segments[i][j],3, front_radius, front_min_num ,shelf_leg_front_pose[i][j].pose_in_laser[0], shelf_leg_front_pose[i][j].pose_in_laser[1],shelf_leg_front_pose[i][j].match_error );
 
                         if(shelf_leg_front_pose[i][j].match_error < 0.05){
                             tf_base_laser.mul(shelf_leg_front_pose[i][j].pose_in_laser, 1, shelf_leg_front_pose[i][j].pose_in_base);
@@ -1986,16 +2028,34 @@ int main(int argc, char** argv){
                                     edge_12, edge_13 , edge_34 ,edge_24,angle31,angle42 ,angle21,angle43, rect_angle1, rect_angle2, rect_angle3, rect_angle4);
                             PLOGD << msg << std::endl;
 
-                            bool valid = std::abs(edge_12 - edge_34) <  shelf_rect_diff[0] && edge_12 > shelf_rect_diff[0] && edge_34 > shelf_rect_diff[0]
-                                    && std::abs(edge_13 - edge_24) <  shelf_rect_diff[1] && edge_13 > shelf_rect_diff[1] && edge_24 > shelf_rect_diff[1]
-                                    && std::abs(rect_angle1 - M_PI_2) < shelf_rect_diff[2]
-                                    && std::abs(rect_angle2 - M_PI_2) < shelf_rect_diff[2]
-                                    && std::abs(rect_angle3 - M_PI_2) < shelf_rect_diff[2]
-                                    && std::abs(rect_angle4 - M_PI_2) < shelf_rect_diff[2]
+                            bool valid = (std::abs(edge_12 - edge_34) <  shelf_rect_diff[0]) && (edge_12 > shelf_rect_diff[0] )&& (edge_34 > shelf_rect_diff[0])
+                                    && (std::abs(edge_13 - edge_24) <  shelf_rect_diff[1] )&& (edge_13 > shelf_rect_diff[1] )&& (edge_24 > shelf_rect_diff[1])
+                                    && (std::abs(rect_angle1 - M_PI_2) < shelf_rect_diff[2])
+                                    && (std::abs(rect_angle2 - M_PI_2) < shelf_rect_diff[2])
+                                    && (std::abs(rect_angle3 - M_PI_2) < shelf_rect_diff[2])
+                                    && (std::abs(rect_angle4 - M_PI_2) < shelf_rect_diff[2])
 //                                    && std::abs(detect_leg1.pose_in_laser[0]) > std::abs(detect_leg3.pose_in_laser[0])
 //                                    && std::abs(detect_leg2.pose_in_laser[0]) > std::abs(detect_leg4.pose_in_laser[0])
 
                                     ;
+                            sprintf(msg,"check valid 1 : %.3f, %.3f, %.3f, %.3f, %.3f, %.3f  ", edge_12 - edge_34, edge_13 - edge_24 , std::abs(rect_angle1 - M_PI_2) ,std::abs(rect_angle2 - M_PI_2),std::abs(rect_angle3 - M_PI_2),std::abs(rect_angle4 - M_PI_2) );
+                            PLOGD << msg << std::endl;
+
+                            sprintf(msg,"check shelf_rect_diff  : %.3f, %.3f, %.3f",   shelf_rect_diff[0], shelf_rect_diff[1],shelf_rect_diff[2] );
+                            PLOGD << msg << std::endl;
+
+
+                            sprintf(msg,"check valid 2 : %d, %d, %d, %d, %d, %d, %d, %d  ",
+                                    (std::abs(edge_12 - edge_34) <  shelf_rect_diff[0]),
+                                    ((edge_12 > shelf_rect_diff[0] )&& (edge_34 > shelf_rect_diff[0])),
+                                    (std::abs(edge_13 - edge_24) <  shelf_rect_diff[1] ),
+                                    ((edge_13 > shelf_rect_diff[1] )&& (edge_24 > shelf_rect_diff[1])),
+                                    (std::abs(rect_angle1 - M_PI_2) < shelf_rect_diff[2])
+                                    , (std::abs(rect_angle2 - M_PI_2) < shelf_rect_diff[2])
+                                    , (std::abs(rect_angle3 - M_PI_2) < shelf_rect_diff[2])
+                                    , (std::abs(rect_angle4 - M_PI_2) < shelf_rect_diff[2])
+                            );
+                                    PLOGD << msg << std::endl;
 
                             float dist = std::sqrt( (model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0])*(model_leg2.pose_in_laser[0] - detect_leg2.pose_in_laser[0]) +  (model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])*(model_leg1.pose_in_laser[1] - model_leg1.pose_in_laser[1])   );
 
@@ -2127,7 +2187,12 @@ int main(int argc, char** argv){
                     target_pose.position.x = 0.5*(detect_leg1.pose_in_laser[0] + detect_leg2.pose_in_laser[0]);
                     target_pose.position.y = 0.5*(detect_leg1.pose_in_laser[1] + detect_leg2.pose_in_laser[1]);
 
-                    math::yaw_to_quaternion(std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + M_PI_2,
+                    math::yaw_to_quaternion(
+ (std::atan2(detect_leg2.pose_in_laser[1] - detect_leg1.pose_in_laser[1]  ,detect_leg2.pose_in_laser[0] - detect_leg1.pose_in_laser[0]) + M_PI_2)
+//                    + 0.25*(std::atan2(detect_leg2.pose_in_laser[1] ,detect_leg2.pose_in_laser[0]))
+//                      + 0.25*(std::atan2(detect_leg1.pose_in_laser[1] ,detect_leg1.pose_in_laser[0]))
+
+                                            ,
                                             target_pose.orientation.x,target_pose.orientation.y,target_pose.orientation.z,target_pose.orientation.w);
                     PLOGD << "target_pose: " << target_pose.position.x << ", " << target_pose.position.y << std::endl;
 
@@ -2177,92 +2242,179 @@ int main(int argc, char** argv){
                 PLOGD << "interpolate control_interpolate_target_in_base: " << control_interpolate_target_in_base[0]<<", " << control_interpolate_target_in_base[1] << std::endl;
 
 
+                auto control_target = detect_target_relative_tf;
+                control_target.set(control_target_in_base[0],control_target_in_base[1],detect_target_relative_tf.yaw());
+                PLOGD << "start optim" << std::endl;
+                transform::Transform2d opt_target_pose;
+                transform::Transform2d opt_init_pose =control_target.inverse() ;
 
-                {
-                    PLOGD << "start optim" << std::endl;
-                    transform::Transform2d opt_target_pose;
-                    transform::Transform2d opt_init_pose =detect_target_relative_tf.inverse() ;
+                std::cout << "opt_init_pose: = \n" << opt_init_pose << std::endl;
+                std::cout << "opt_target_pose: = \n" << opt_target_pose << std::endl;
 
-                    std::cout << "opt_init_pose: = \n" << opt_init_pose << std::endl;
-                    std::cout << "opt_target_pose: = \n" << opt_target_pose << std::endl;
+                bool need_curve_path_compute = !curve_path_computed;
+
+                if( std::abs(opt_init_pose.y()) > 3*control_dist_tolerance
+                || std::abs(opt_init_pose.x()) > 0.4
+                ){
+                    need_curve_path_compute = true;
+
+                }
+
+                if(need_curve_path_compute){
+
 
                     size_t optim_param_num = 6;
                     Eigen::VectorXd x(optim_param_num);
                     x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
 
-//                    solve_curve_path_plan(opt_init_pose,opt_target_pose, x );
-                    x = test_PathSolver(opt_init_pose.x(),opt_init_pose.y(),opt_init_pose.yaw());
-                    std::cout << "solution: x = \n" << x << std::endl;
-                    float curve = 0.0;
-                    float dist = 0.0;
-                    int N= 10;
-                    float dist_inc = x(1)/float(N);
-                    transform::Transform2d next_pose;
-                    dist = 0.0;
-                    curve= x(0);
-                    dist_inc = x(1)/float(N);
-                    opt_init_pose.set(0.0,0.0,0.0);
-                    for(int i = 0; i < N; i++){
-                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                        dist += dist_inc;
+                    bool rt = solve_curve_path_plan(opt_init_pose,opt_target_pose, x );
+//                    x = test_PathSolver(opt_init_pose.x(),opt_init_pose.y(),opt_init_pose.yaw());
 
-                        marker_arrow_msg.pose.position.x = next_pose.x();
-                        marker_arrow_msg.pose.position.y = next_pose.y();
-                        math::yaw_to_quaternion( next_pose.yaw(),
-                                                marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                        marker_arrow_msg.id = marker_array_msg.markers.size();
-                        marker_arrow_msg.header.stamp = scan_time;
+                    if(rt){
+                        std::cout << "solution: x = \n" << x << std::endl;
+                        float curve = 0.0;
+                        float dist = 0.0;
+                        int N= 10;
+                        float dist_inc = x(1)/float(N);
+                        transform::Transform2d next_pose;
 
-                        marker_array_msg.markers.emplace_back(marker_arrow_msg);
-                    }
-                    opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
+                        next_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
+                        next_pose = updateCurveDIst(next_pose, x(2), x(3));
+                        next_pose = updateCurveDIst(next_pose, x(4), x(5));
+                        curve_path_computed =(
 
-                    dist = 0.0;
-                    curve= x(2);
-                    dist_inc = x(3)/float(N);
-                    for(int i = 0; i < N; i++){
-                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                        dist += dist_inc;
+                                                     ((next_pose.x() - opt_target_pose.x())*(next_pose.x() - opt_target_pose.x()) +
+                                                      (next_pose.y() - opt_target_pose.y())*(next_pose.y() - opt_target_pose.y())) < control_dist_tolerance*control_dist_tolerance
 
-                        marker_arrow_msg.pose.position.x = next_pose.x();
-                        marker_arrow_msg.pose.position.y = next_pose.y();
-                        math::yaw_to_quaternion( next_pose.yaw(),
+                                             )&&(
+                                                     std::abs( next_pose.yaw() - opt_target_pose.yaw() ) < control_angle_tolerance
+                                             )
+                                ;
+                        PLOGD<<   "predict final opt_init_pose  = \n" << next_pose << std::endl;
+
+                        PLOGD<<   "check final curve_path_computed  =  " << curve_path_computed << std::endl;
+
+                        if(curve_path_computed){
+                            control_path_pose_array.clear();
+
+                            dist = 0.0;
+                            curve= x(0);
+                            dist_inc = x(1)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                                control_path_pose_array.emplace_back(next_pose);
+                                dist += dist_inc;
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
+
+                            dist = 0.0;
+                            curve= x(2);
+                            dist_inc = x(3)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                                control_path_pose_array.emplace_back(next_pose);
+
+                                dist += dist_inc;
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
+                            dist = 0.0;
+                            curve= x(4);
+                            dist_inc = x(5)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                                control_path_pose_array.emplace_back(next_pose);
+
+                                dist += dist_inc;
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
+
+
+
+
+                        }
+                        if(curve_path_computed){
+                            marker_arrow_msg_array.clear();
+                            opt_init_pose.set(0.0,0.0,0.0);
+                            dist = 0.0;
+                            curve= x(0);
+                            dist_inc = x(1)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+
+                                dist += dist_inc;
+                                marker_arrow_msg.pose.position.x = next_pose.x();
+                                marker_arrow_msg.pose.position.y = next_pose.y();
+                                math::yaw_to_quaternion( next_pose.yaw(),
+                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
+                                marker_arrow_msg.header.stamp = scan_time;
+
+                                marker_arrow_msg_array.push_back(marker_arrow_msg);
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
+
+                            dist = 0.0;
+                            curve= x(2);
+                            dist_inc = x(3)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                                dist += dist_inc;
+
+                                marker_arrow_msg.pose.position.x = next_pose.x();
+                                marker_arrow_msg.pose.position.y = next_pose.y();
+                                math::yaw_to_quaternion( next_pose.yaw(),
+                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
+                                marker_arrow_msg.header.stamp = scan_time;
+
+                                marker_arrow_msg_array.push_back(marker_arrow_msg);
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
+                            dist = 0.0;
+                            curve= x(4);
+                            dist_inc = x(5)/float(N);
+                            for(int i = 0; i < N; i++){
+                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
+                                dist += dist_inc;
+
+                                marker_arrow_msg.pose.position.x = next_pose.x();
+                                marker_arrow_msg.pose.position.y = next_pose.y();
+                                math::yaw_to_quaternion( next_pose.yaw(),
+                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
+                                marker_arrow_msg.header.stamp = scan_time;
+
+                                marker_arrow_msg_array.push_back(marker_arrow_msg);
+                            }
+                            opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
+                            PLOGD<<   "predict final opt_init_pose  = \n" << opt_init_pose << std::endl;
+
+
+                        }
+
+
+
+
+                        marker_arrow_msg.pose.position.x = opt_init_pose.x();
+                        marker_arrow_msg.pose.position.y = opt_init_pose.y();
+                        math::yaw_to_quaternion( opt_init_pose.yaw(),
                                                  marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                        marker_arrow_msg.id = marker_array_msg.markers.size();
+                        marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
                         marker_arrow_msg.header.stamp = scan_time;
 
-                        marker_array_msg.markers.push_back(marker_arrow_msg);
+                        marker_arrow_msg_array.push_back(marker_arrow_msg);
                     }
-                    opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
-                    dist = 0.0;
-                    curve= x(4);
-                    dist_inc = x(5)/float(N);
-                    for(int i = 0; i < N; i++){
-                        next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                        dist += dist_inc;
 
-                        marker_arrow_msg.pose.position.x = next_pose.x();
-                        marker_arrow_msg.pose.position.y = next_pose.y();
-                        math::yaw_to_quaternion( next_pose.yaw(),
-                                                 marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                        marker_arrow_msg.id = marker_array_msg.markers.size();
-                        marker_arrow_msg.header.stamp = scan_time;
+                }
 
-                        marker_array_msg.markers.push_back(marker_arrow_msg);
-                    }
-                    opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
-                    PLOGD<<   "predict final opt_init_pose  = \n" << opt_init_pose << std::endl;
+                if(curve_path_computed){
+
+                }
 
 
-
-                    marker_arrow_msg.pose.position.x = opt_init_pose.x();
-                    marker_arrow_msg.pose.position.y = opt_init_pose.y();
-                    math::yaw_to_quaternion( opt_init_pose.yaw(),
-                                             marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                    marker_arrow_msg.id = marker_array_msg.markers.size();
-                    marker_arrow_msg.header.stamp = scan_time;
-
-                    marker_array_msg.markers.push_back(marker_arrow_msg);
+                marker_array_msg.markers.insert(marker_array_msg.markers.end(),marker_arrow_msg_array.begin(),marker_arrow_msg_array.end() );
+                for(auto&m :marker_array_msg.markers){
+                    m.header.stamp = scan_time;
                 }
                 cloud_target_pub.publish(marker_array_msg);
 
