@@ -105,10 +105,8 @@ namespace perception{
                     continue;
                 }
 
-                std::cout << "[m_i, m_j] = [" << m_i << ", " << m_j << "]\n";
-
-
-                std::cout << "[input_points[m_i].size(), input_points[m_j].size()] = [" << input_points[m_i].size() << ", " << input_points[m_j].size() << "]\n";
+//                std::cout << "[m_i, m_j] = [" << m_i << ", " << m_j << "]\n";
+//                std::cout << "[input_points[m_i].size(), input_points[m_j].size()] = [" << input_points[m_i].size() << ", " << input_points[m_j].size() << "]\n";
 
 
                 dist1 =  std::sqrt( (model_points[m_i].pose_in_base[0] -model_points[m_j].pose_in_base[0] )*(model_points[m_i].pose_in_base[0] -model_points[m_j].pose_in_base[0] )
@@ -121,15 +119,14 @@ namespace perception{
                     for(size_t l = 0 ; l < input_points[m_j].size(); l++){
 
 
-                        std::cout << "[k, l] = [" << k << ", " << l << "]\n";
 
                         dist2 =  std::sqrt(
                                 (input_points[m_i][k].pose_in_base[0] -input_points[m_j][l].pose_in_base[0] )*(input_points[m_i][k].pose_in_base[0] -input_points[m_j][l].pose_in_base[0] )
                                 + (input_points[m_i][k].pose_in_base[1] -input_points[m_j][l].pose_in_base[1] )*(input_points[m_i][k].pose_in_base[1] -input_points[m_j][l].pose_in_base[1] )
                         );
 
-
-                        std::cout << "[dist1, dist2] = [" << dist1 << ", " << dist2 << "]\n";
+//                        std::cout << "[k, l] = [" << k << ", " << l << "]\n";
+//                        std::cout << "[dist1, dist2] = [" << dist1 << ", " << dist2 << "]\n";
 
                         float diff = std::abs(dist1 - dist2);
 
@@ -154,17 +151,17 @@ namespace perception{
         }
 
 
-        std::cout << "check match_edges:\n";
+//        std::cout << "check match_edges:\n";
         for(size_t i = 0 ; i < match_edges.size();i++){
             for(size_t j = 0 ; j < match_edges[i].size();j++){
                 for(auto& e : match_edges[i][j]){
-                    std::cout << "* " << i << ", " << j << ", " << e[0] << ", " << e[1] << ", " << e[2] << "\n";
+//                    std::cout << "* " << i << ", " << j << ", " << e[0] << ", " << e[1] << ", " << e[2] << "\n";
                 }
             }
         }
 
 
-        std::cout << "check match_edges done" << std::endl;
+//        std::cout << "check match_edges done" << std::endl;
 
 
         std::array<int,10> select_points_index;
@@ -197,7 +194,7 @@ namespace perception{
 
             for(auto& p:model_query_index[i]){
 
-                std::cout << "* " << i << ", "<< p << "\n";
+//                std::cout << "* " << i << ", "<< p << "\n";
                 array_write_head_start = array_write_num*last_branch_num;
                 array_write_head_end = array_write_head_start + last_branch_num;
 
@@ -222,21 +219,21 @@ namespace perception{
         }
 
 
-        std::cout << "check all_possible_num  " << all_possible_num << std::endl;
+//        std::cout << "check all_possible_num  " << all_possible_num << std::endl;
 
 
 
         std::vector<std::array<int,10>> final_select_points_index_group;
 
-        std::cout << "check select_points_index_group: " << select_points_index_group.size() << "\n";
+//        std::cout << "check select_points_index_group: " << select_points_index_group.size() << "\n";
 
 
         for(auto &row : select_points_index_group){
-            std::cout << "---list row \n";
-            for(auto& n : row){
-                std::cout << n << ", ";
-            }
-            std::cout << "---\n";
+//            std::cout << "---list row \n";
+//            for(auto& n : row){
+//                std::cout << n << ", ";
+//            }
+//            std::cout << "---\n";
 
             bool match_fail = false;
             float match_error = 0.0;
@@ -266,10 +263,9 @@ namespace perception{
                                         + (input_points[m_i][k].pose_in_base[1] -input_points[m_j][l].pose_in_base[1] )*(input_points[m_i][k].pose_in_base[1] -input_points[m_j][l].pose_in_base[1] ));
 
 
-                    std::cout << "[m_i, m_i] = [" << m_i << ", " << m_j << "]\n";
-                    std::cout << "[k, l] = [" << k << ", " << l << "]\n";
-
-                    std::cout << "[dist1, dist2] = [" << dist1 << ", " << dist2 << "]\n";
+//                    std::cout << "[m_i, m_i] = [" << m_i << ", " << m_j << "]\n";
+//                    std::cout << "[k, l] = [" << k << ", " << l << "]\n";
+//                    std::cout << "[dist1, dist2] = [" << dist1 << ", " << dist2 << "]\n";
 
                     float diff = std::abs(dist1 - dist2);
                     match_error += diff;
@@ -289,7 +285,7 @@ namespace perception{
 
             }
 
-            std::cout << "match_fail " << match_fail << "\n";
+//            std::cout << "match_fail " << match_fail << "\n";
 
             if(!match_fail){
 
@@ -314,7 +310,7 @@ namespace perception{
         }
 
 
-        std::cout << "check model_query_index done " << std::endl;
+//        std::cout << "check model_query_index done " << std::endl;
 
 
         return true;

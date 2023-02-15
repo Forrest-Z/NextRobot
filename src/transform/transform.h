@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <vector>
+#include <array>
 #include <iostream>
 
 namespace transform{
@@ -258,7 +259,7 @@ namespace transform{
         }
 
     };
-    std::ostream& operator <<(std::ostream& out,const Transform2d& rhv ){
+    inline std::ostream& operator <<(std::ostream& out,const Transform2d& rhv ){
         out << "Transform2d:\n";
 //    out.unsetf ( std::ios::floatfield );                // floatfield not set
         out.precision(5);

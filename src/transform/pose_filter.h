@@ -43,6 +43,11 @@ namespace transform{
             move_flag_last = 0;
             update_flag = 0;
         }
+
+        void resetTrigger(){
+            move_flag_last =  move_flag;
+
+        }
         // trigger at move or first frame
         bool checkMoveTrigger(const transform::Transform2d &new_pose) {
             movement = last_move_pose_inv * new_pose;

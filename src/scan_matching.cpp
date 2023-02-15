@@ -2016,7 +2016,8 @@ int main(int argc, char **argv) {
                     is_map_update = true;
 //                PLOGD << "try add cloud to map "<< std::endl;
 
-                    movement_check.move_flag_last = movement_check.move_flag;
+                    movement_check.resetTrigger();
+
                 }
 
 

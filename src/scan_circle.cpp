@@ -65,10 +65,11 @@
  */
 
 #include "pid.h"
+#include "transform/pose_filter.h"
 
 
 
-
+#include "control/optim_path_planner.h"
 /*
 
  robot pose define in final target frame
@@ -948,8 +949,10 @@ int main(int argc, char** argv){
     bool detect_target_absolute_pose_computed = false;
     bool detect_target_stop_update = false;
     float detect_target_stop_update_dist = 0.3;
+    float stop_plan_dist = 0.4;
     const char* detect_target_stop_update_dist_param = "detect_target_stop_update_dist";
 
+    const char* stop_plan_dist_param = "stop_plan_dist";
     std::array<float,4> shelf_empty_region{0.0,0.0,0.0,0.0};
 
     // odom_base_tf_1* detect_target_relative_tf_1 = odom_base_tf_2* detect_target_relative_tf_2
@@ -1322,6 +1325,7 @@ int main(int argc, char** argv){
 
         nh_private.getParam(detect_target_stop_update_dist_param, detect_target_stop_update_dist);
 
+        nh_private.getParam(stop_plan_dist_param, stop_plan_dist);
 
         nh_private.getParam(max_fit_error_param, max_fit_error);
         nh_private.getParam(sleep_time_param, sleep_time);
@@ -1522,6 +1526,14 @@ int main(int argc, char** argv){
         control_path_pose_array.clear();
 
     };
+
+
+    control::PathPlanner path_planner;
+
+    transform::MovementCheck movement_check;
+    movement_check.move_translation_epsilon = 0.1;
+    movement_check.move_rotation_epsilon = 0.05;
+
 
     while (ros::ok()){
         nh_private.getParam(run_param,run_command);
@@ -2213,6 +2225,9 @@ int main(int argc, char** argv){
                     }
                 }
 
+                if(!first_detect_ok){
+                    movement_check.reset();
+                }
                 first_detect_ok = true;
 
 
@@ -2253,24 +2268,36 @@ int main(int argc, char** argv){
 
                 bool need_curve_path_compute = !curve_path_computed;
 
-                if( std::abs(opt_init_pose.y()) > 3*control_dist_tolerance
-                || std::abs(opt_init_pose.x()) > 0.4
+                movement_check.checkMoveTrigger(tf_odom_base);
+
+                if(
+                        std::abs(opt_init_pose.x()) > stop_plan_dist
+                && movement_check.isMoveTriggered()
                 ){
                     need_curve_path_compute = true;
+                    movement_check.resetTrigger();
 
                 }
 
+                std::cout << "need_curve_path_compute: = " << need_curve_path_compute << std::endl;
+
+
                 if(need_curve_path_compute){
+
 
 
                     size_t optim_param_num = 6;
                     Eigen::VectorXd x(optim_param_num);
                     x << 1e-5, 0.1 ,1e-5,0.1,1e-5,0.1;
 
-                    bool rt = solve_curve_path_plan(opt_init_pose,opt_target_pose, x );
+//                    bool rt = solve_curve_path_plan(opt_init_pose,opt_target_pose, x );
 //                    x = test_PathSolver(opt_init_pose.x(),opt_init_pose.y(),opt_init_pose.yaw());
+                    bool rt = path_planner.solve(opt_init_pose,opt_target_pose);
+                    x = path_planner.solved_params;
 
                     if(rt){
+
+
                         std::cout << "solution: x = \n" << x << std::endl;
                         float curve = 0.0;
                         float dist = 0.0;
@@ -2296,120 +2323,87 @@ int main(int argc, char** argv){
 
                         if(curve_path_computed){
                             control_path_pose_array.clear();
-
-                            dist = 0.0;
-                            curve= x(0);
-                            dist_inc = x(1)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                                control_path_pose_array.emplace_back(next_pose);
-                                dist += dist_inc;
-                            }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
-
-                            dist = 0.0;
-                            curve= x(2);
-                            dist_inc = x(3)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                                control_path_pose_array.emplace_back(next_pose);
-
-                                dist += dist_inc;
-                            }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
-                            dist = 0.0;
-                            curve= x(4);
-                            dist_inc = x(5)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                                control_path_pose_array.emplace_back(next_pose);
-
-                                dist += dist_inc;
-                            }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
-
-
-
-
-                        }
-                        if(curve_path_computed){
                             marker_arrow_msg_array.clear();
-                            opt_init_pose.set(0.0,0.0,0.0);
-                            dist = 0.0;
-                            curve= x(0);
-                            dist_inc = x(1)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
 
-                                dist += dist_inc;
-                                marker_arrow_msg.pose.position.x = next_pose.x();
-                                marker_arrow_msg.pose.position.y = next_pose.y();
-                                math::yaw_to_quaternion( next_pose.yaw(),
-                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
-                                marker_arrow_msg.header.stamp = scan_time;
 
-                                marker_arrow_msg_array.push_back(marker_arrow_msg);
+                            for(size_t i = 0; i < path_planner.path_segments.size(); i++){
+                                auto& path = path_planner.path_segments[i];
+//                                marker_arrow_msg.color.r = 1.0 - 0.1*(i+1);
+//                                marker_arrow_msg.color.g = 1.0 - 0.1*(i+1);
+                                marker_arrow_msg.color.b = 1.0 - 0.1*(i+1);
+                                for(auto &p : path.path){
+                                    next_pose = control_target*p;
+                                    marker_arrow_msg.pose.position.x = next_pose.x();
+                                    marker_arrow_msg.pose.position.y = next_pose.y();
+                                    math::yaw_to_quaternion( next_pose.yaw(),
+                                                             marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
+                                    marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
+                                    marker_arrow_msg.header.stamp = scan_time;
+                                    marker_arrow_msg_array.push_back(marker_arrow_msg);
+                                }
                             }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(0), x(1));
-
-                            dist = 0.0;
-                            curve= x(2);
-                            dist_inc = x(3)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                                dist += dist_inc;
-
-                                marker_arrow_msg.pose.position.x = next_pose.x();
-                                marker_arrow_msg.pose.position.y = next_pose.y();
-                                math::yaw_to_quaternion( next_pose.yaw(),
-                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
-                                marker_arrow_msg.header.stamp = scan_time;
-
-                                marker_arrow_msg_array.push_back(marker_arrow_msg);
-                            }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(2), x(3));
-                            dist = 0.0;
-                            curve= x(4);
-                            dist_inc = x(5)/float(N);
-                            for(int i = 0; i < N; i++){
-                                next_pose = updateCurveDIst(opt_init_pose, curve, dist);
-                                dist += dist_inc;
-
-                                marker_arrow_msg.pose.position.x = next_pose.x();
-                                marker_arrow_msg.pose.position.y = next_pose.y();
-                                math::yaw_to_quaternion( next_pose.yaw(),
-                                                         marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                                marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
-                                marker_arrow_msg.header.stamp = scan_time;
-
-                                marker_arrow_msg_array.push_back(marker_arrow_msg);
-                            }
-                            opt_init_pose = updateCurveDIst(opt_init_pose, x(4), x(5));
-                            PLOGD<<   "predict final opt_init_pose  = \n" << opt_init_pose << std::endl;
-
-
                         }
 
-
-
-
-                        marker_arrow_msg.pose.position.x = opt_init_pose.x();
-                        marker_arrow_msg.pose.position.y = opt_init_pose.y();
-                        math::yaw_to_quaternion( opt_init_pose.yaw(),
-                                                 marker_arrow_msg.pose.orientation.x,marker_arrow_msg.pose.orientation.y,marker_arrow_msg.pose.orientation.z,marker_arrow_msg.pose.orientation.w);
-                        marker_arrow_msg.id = 100+marker_arrow_msg_array.size();
-                        marker_arrow_msg.header.stamp = scan_time;
-
-                        marker_arrow_msg_array.push_back(marker_arrow_msg);
                     }
 
                 }
 
-                if(curve_path_computed){
+
+                float local_curve, local_dist;
+                bool local_compute_ok = path_planner.computeLocalCurve(opt_init_pose,local_curve,local_dist );
+
+
+                if(local_compute_ok){
+                    std::cout << "local_curve: = " << local_curve << ", local_dist: = " << local_dist << std::endl;
+
+
+                    float dist_to_final_target = std::sqrt(opt_init_pose.x()*opt_init_pose.x() + opt_init_pose.y()*opt_init_pose.y());
+
+
+                    PLOGD << "detect_target_stop_update: " << detect_target_stop_update << std::endl;
+
+                    if(dist_to_final_target < detect_target_stop_update_dist){
+                        detect_target_stop_update = false;
+                    }
+
+
+                    float local_speed = ( (dist_to_final_target > 0.1)? (0.6) : (dist_to_final_target * 5 + 0.1))*static_forward_vel*( (std::abs(local_curve) < 10) ? ( 1.0 - 0.1*std::abs(local_curve)) :(0.0) ) ;
+
+                    float local_time = std::abs(local_dist)/std::abs(local_speed);
+
+                    float local_angle = local_curve*local_dist;
+
+                    float local_rotate_speed = local_angle/local_time;
+                    cmd_vel_msg.angular.z = local_rotate_speed;
+                    cmd_vel_msg.linear.x =  local_speed;
+
+                    PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
+                    PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
+                    if(enable_control){
+                        cmd_vel_pub.publish(cmd_vel_msg);
+
+                    }
+
+                    if(std::abs(opt_init_pose.x())<control_dist_tolerance
+                && std::abs(opt_init_pose.yaw()) < control_angle_tolerance
+                            ){
+
+                        cmd_vel_msg.angular.z = 0;
+                        cmd_vel_msg.linear.x =  0;
+
+                        cmd_vel_pub.publish(cmd_vel_msg);
+                        PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+
+                        control_finished_cnt++;
+                        if(control_finished_cnt > 10){
+                            start_run = 0;
+                        }
+                    }
+
+
 
                 }
+
 
 
                 marker_array_msg.markers.insert(marker_array_msg.markers.end(),marker_arrow_msg_array.begin(),marker_arrow_msg_array.end() );
@@ -2430,93 +2424,94 @@ int main(int argc, char** argv){
 
                 detect_results_pub.publish(detect_results_msg);
 
+                if(0){
+                    float marker_angle = std::atan2(control_interpolate_target_in_base[1],control_interpolate_target_in_base[0]);
+                    float angle_diff = marker_angle - control_target_angle;
 
+                    marker_distance = std::sqrt(control_interpolate_target_in_base[0]*control_interpolate_target_in_base[0] + control_interpolate_target_in_base[1]*control_interpolate_target_in_base[1]   );
+                    float distance_diff = marker_distance ;//- control_target_distance;
 
-                float marker_angle = std::atan2(control_interpolate_target_in_base[1],control_interpolate_target_in_base[0]);
-                float angle_diff = marker_angle - control_target_angle;
-
-                marker_distance = std::sqrt(control_interpolate_target_in_base[0]*control_interpolate_target_in_base[0] + control_interpolate_target_in_base[1]*control_interpolate_target_in_base[1]   );
-                float distance_diff = marker_distance ;//- control_target_distance;
-
-                PLOGD << "angle_diff: " << angle_diff << std::endl;
-                PLOGD << "distance_diff: " << distance_diff << std::endl;
-
-                PLOGD << "detect_target_stop_update: " << detect_target_stop_update << std::endl;
+                    PLOGD << "angle_diff: " << angle_diff << std::endl;
+                    PLOGD << "distance_diff: " << distance_diff << std::endl;
 
 
 
-                {
-                    if( std::abs(angle_diff) > final_control_angle){
-                        cmd_vel_msg.angular.z =  final_control_angle*rotate_pid_control_kp*(angle_diff> 0.0 ? 1.0:-1.0);;
-                        cmd_vel_msg.angular.z =  static_rotate_vel*(angle_diff> 0.0 ? 1.0:-1.0);;
 
-                    }else{
-                        double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
-                        PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
+                    {
+                        if( std::abs(angle_diff) > final_control_angle){
+                            cmd_vel_msg.angular.z =  final_control_angle*rotate_pid_control_kp*(angle_diff> 0.0 ? 1.0:-1.0);;
+                            cmd_vel_msg.angular.z =  static_rotate_vel*(angle_diff> 0.0 ? 1.0:-1.0);;
 
-                        if(std::abs(rotate_pid_inc) < control_rotate_vel_tolerance || std::abs(angle_diff) < control_angle_tolerance){
-                            rotate_pid_inc = 0.0;
+                        }else{
+                            double rotate_pid_inc = rotate_pid.calculate(angle_diff, 0.0);
+                            PLOGD << "rotate_pid_inc: " << rotate_pid_inc << std::endl;
+
+                            if(std::abs(rotate_pid_inc) < control_rotate_vel_tolerance || std::abs(angle_diff) < control_angle_tolerance){
+                                rotate_pid_inc = 0.0;
+                            }
+                            cmd_vel_msg.angular.z =  rotate_pid_inc;
+
                         }
-                        cmd_vel_msg.angular.z =  rotate_pid_inc;
+                    }
+
+                    if(std::abs(control_target_in_base[0]) <detect_target_stop_update_dist){
+                        cmd_vel_msg.angular.z =  0.0;
 
                     }
-                }
-
-                if(std::abs(control_target_in_base[0]) <detect_target_stop_update_dist){
-                    cmd_vel_msg.angular.z =  0.0;
-
-                }
 
 
 
 
-                float target_pose_x = distance_diff * std::cos(marker_angle);
+                    float target_pose_x = distance_diff * std::cos(marker_angle);
 
 
 //            if(std::abs(angle_diff) < 0.02)
-                {
+                    {
 
-                    if(std::abs(target_pose_x) > final_control_dist){
-                        cmd_vel_msg.linear.x =  final_control_dist*forward_pid_control_kp*(target_pose_x> 0.0 ? 1.0:-1.0);
-                        cmd_vel_msg.linear.x =  static_forward_vel;
+                        if(std::abs(target_pose_x) > final_control_dist){
+                            cmd_vel_msg.linear.x =  final_control_dist*forward_pid_control_kp*(target_pose_x> 0.0 ? 1.0:-1.0);
+                            cmd_vel_msg.linear.x =  static_forward_vel;
 
-                    }else{
-                        double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
+                        }else{
+                            double forward_pid_inc = forward_pid.calculate(target_pose_x, 0.0);
 
-                        PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
-                        if(std::abs(forward_pid_inc) < control_forward_vel_tolerance || std::abs(target_pose_x) < control_dist_tolerance){
-                            forward_pid_inc = 0.0;
+                            PLOGD << "forward_pid_inc: " << forward_pid_inc << std::endl;
+                            if(std::abs(forward_pid_inc) < control_forward_vel_tolerance || std::abs(target_pose_x) < control_dist_tolerance){
+                                forward_pid_inc = 0.0;
+                            }
+                            cmd_vel_msg.linear.x =  forward_pid_inc;
                         }
-                        cmd_vel_msg.linear.x =  forward_pid_inc;
+
+                        debug_info_msg.x =target_pose_x;
+                        debug_info_msg.y =marker_angle;
+
+                        debug_info_pub.publish(debug_info_msg);
+
                     }
 
-                    debug_info_msg.x =target_pose_x;
-                    debug_info_msg.y =marker_angle;
-
-                    debug_info_pub.publish(debug_info_msg);
-
-                }
 
 
+                    PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
+                    PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
+                    if(!enable_control){
+                        continue;
+                    }
 
-                PLOGD << "cmd_vel_msg.angular.z : " <<   cmd_vel_msg.angular.z  << std::endl;
-                PLOGD << "cmd_vel_msg.linear.x : " <<  cmd_vel_msg.linear.x << std::endl;
-                if(!enable_control){
-                    continue;
-                }
+                    cmd_vel_pub.publish(cmd_vel_msg);
 
-                cmd_vel_pub.publish(cmd_vel_msg);
-
-                if(std::abs(target_pose_x)<control_dist_tolerance
+                    if(std::abs(target_pose_x)<control_dist_tolerance
 //                && std::abs(angle_diff) < control_angle_tolerance
-                ){
-                    PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
+                            ){
+                        PLOGD << "control finished test : " <<  control_finished_cnt << std::endl;
 
-                    control_finished_cnt++;
-                    if(control_finished_cnt > 10){
-                        start_run = 0;
+                        control_finished_cnt++;
+                        if(control_finished_cnt > 10){
+                            start_run = 0;
+                        }
                     }
+
                 }
+
 
 
 
