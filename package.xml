@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>scan_republisher</name>
+  <name>NextRobot</name>
   <version>0.0.0</version>
   <description>The topic_serialization package</description>
 

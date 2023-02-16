@@ -39,7 +39,8 @@ if (CMAKE_BUILD_TYPE MATCHES Release)
 
 
     #    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--whole-archive  -Wl,--no-whole-archive")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math -O3 -march=native -ftree-vectorize -fopt-info-vec-optimized ")
+    #  -ffp-contract=fast -flto
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math -O2 -march=native -ftree-vectorize -fopt-info-vec-optimized -ffp-contract=fast -flto")
 
 endif ()
 

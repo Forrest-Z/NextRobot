@@ -28,6 +28,7 @@ macro(set_target_rpath __Target)
             PROPERTY BUILD_RPATH
             "${CMAKE_BINARY_DIR}/lib"
             "$ORIGIN/../lib"
+            "$ORIGIN/.."
             ${extra_args}
 
     )
@@ -36,6 +37,7 @@ macro(set_target_rpath __Target)
             PROPERTY INSTALL_RPATH
             "${CMAKE_INSTALL_PREFIX}/lib"
             "$ORIGIN/../lib"
+            "$ORIGIN/.."
             ${extra_args}
 
     )
@@ -48,9 +50,9 @@ macro(set_target_runpath __Target)
     set_property(
             TARGET ${__Target}
             PROPERTY BUILD_RPATH
-            PROPERTY BUILD_RPATH
             "${CMAKE_BINARY_DIR}/lib"
             "$ORIGIN/../lib"
+            "$ORIGIN/.."
             ${extra_args}
 
     )
@@ -59,6 +61,7 @@ macro(set_target_runpath __Target)
             PROPERTY INSTALL_RPATH
             "${CMAKE_INSTALL_PREFIX}/lib"
             "$ORIGIN/../lib"
+            "$ORIGIN/.."
             ${extra_args}
 
     )

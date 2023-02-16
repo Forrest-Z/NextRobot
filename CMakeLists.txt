@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.0.2)
 cmake_policy(SET CMP0074 NEW)
-project(scan_republisher)
+project(NextRobot)
 
 
 
@@ -258,42 +258,116 @@ message(Ceres_ROOT : ${Ceres_ROOT} ,CERES_LIBRARIES : ${CERES_LIBRARIES} )
 build_external_project(PCL lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pcl-pcl-1.12.1.tar.gz  -DCMAKE_BUILD_TYPE=Release  -DBUILD_examples=OFF -DBUILD_apps=OFF -DBUILD_global_tests=OFF -DBUILD_simulation=OFF)
 find_package(PCL REQUIRED)
 
+
+build_external_project(autodiff lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/autodiff-0.6.12.tar.gz  -DCMAKE_BUILD_TYPE=Release  -DAUTODIFF_BUILD_TESTS=OFF -DAUTODIFF_BUILD_PYTHON=OFF -DAUTODIFF_BUILD_EXAMPLES=OFF -DAUTODIFF_BUILD_DOCS=OFF)
+find_package(autodiff REQUIRED)
+
+
+
 #octomap-1.9.6.tar.gz
 build_external_project(octomap lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/octomap-1.9.6.tar.gz  -DCMAKE_BUILD_TYPE=Release  -DBUILD_OCTOVIS_SUBPROJECT=OFF -DBUILD_DYNAMICETD3D_SUBPROJECT=OFF)
 find_package(octomap REQUIRED)
 
 
+#ifm3d
+#ifm3d-0.93.0.zip
+build_external_project(ifm3d lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ifm3d-0.93.0.zip -DBUILD_SHARED_LIBS=OFF  -DCMAKE_BUILD_TYPE=Release  -DPCL_ROOT=${PCL_ROOT} -DBUILD_TESTS=OFF)
+
+set(glog_ROOT ${ifm3d_ROOT}/lib/cmake/glog )
+
+find_package(glog REQUIRED)
+set(CURL_ROOT ${ifm3d_ROOT}/lib/cmake/CURL )
+
+find_package(CURL REQUIRED)
+
+
+set(xmlrpc-c_ROOT ${ifm3d_ROOT}/lib/cmake/xmlrpc-c )
+find_package(
+        xmlrpc-c CONFIG
+        REQUIRED COMPONENTS xmlrpc xmlrpc_client xmlrpc++ xmlrpc_client++
+)
+
+
+find_package(ifm3d REQUIRED COMPONENTS
+        camera
+        framegrabber
+        stlimage
+        )
+
+
 add_executable(scan_republisher src/scan_republisher.cpp src/message/MqttClient.cpp)
 target_link_libraries(scan_republisher PUBLIC  ${catkin_LIBRARIES} ${mosquitto_LIBRARY} ) 
-target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
+target_include_directories(scan_republisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS} ${mosquitto_INCLUDE_DIR}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
 
+
+if (build_1)
 add_executable(scan_filter_intensity src/scan_filter_intensity.cpp)
 target_link_libraries(scan_filter_intensity PUBLIC  ${catkin_LIBRARIES}  ${CERES_LIBRARIES})
-target_include_directories(scan_filter_intensity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
+target_include_directories(scan_filter_intensity PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann)
+
+install(TARGETS scan_filter_intensity
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+        )
+endif()
+
 
 
 find_package (Eigen3 REQUIRED NO_MODULE)
 
-add_library(pcl_norm_2d STATIC src/icp/PCA2D.cpp src/icp/Normal2dEstimation.cpp)
-target_include_directories( pcl_norm_2d PUBLIC  ${EIGEN3_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include  ${CMAKE_SOURCE_DIR}/third_party/nlohmann  ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+#add_library(pcl_norm_2d STATIC src/icp/PCA2D.cpp src/icp/Normal2dEstimation.cpp)
+#target_include_directories( pcl_norm_2d PUBLIC BEFORE ${EIGEN3_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/include  ${CMAKE_SOURCE_DIR}/third_party/nlohmann  ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
 
 
 
 
 
-add_executable(scan_matching src/scan_matching.cpp)
-target_include_directories(scan_matching PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+add_executable(scan_slam src/scan_matching.cpp src/ros_tool/RvizInteractiveControlTool.cpp)
+target_include_directories(scan_slam PUBLIC BEFORE   ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
 
-target_link_libraries(scan_matching PUBLIC pcl_norm_2d ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
-if(scan_matching_debug)
-    set_asan(scan_matching)
+target_link_libraries(scan_slam PUBLIC  ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
+set(scan_slam_debug OFF)
+if(scan_slam_debug)
+    set_asan(scan_slam)
 endif()
 
 
-add_executable(scan_circle src/scan_circle.cpp)
-target_include_directories(scan_circle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include  ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+# https://github.com/openresty/luajit2
+build_external_project_command(luajit lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/luajit2-2.1-20230119.tar.gz "mkdir -p ${CMAKE_BINARY_DIR}/force_luajit/install/bin/luajit-2.1.0-beta3" "make PREFIX=${CMAKE_BINARY_DIR}/force_luajit/install" "make install PREFIX=${CMAKE_BINARY_DIR}/force_luajit/install")
+set(LUA_LIBRARIES ${luajit_ROOT}/lib/libluajit-5.1.a)
+set(LUA_INCLUDE_DIR ${luajit_ROOT}/include/luajit-2.1)
 
-target_link_libraries(scan_circle PUBLIC pcl_norm_2d ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES} )
+add_library(liblua STATIC IMPORTED)
+set_target_properties(liblua PROPERTIES  IMPORTED_LOCATION "${LUA_LIBRARIES}")
+target_include_directories(liblua INTERFACE ${LUA_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sol)
+target_link_libraries(liblua INTERFACE  dl )
+
+#build_external_project(Matplot++ lib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/matplotplusplus-1.1.0.tar.gz  -DBUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON)
+#find_package(Matplot++ REQUIRED)
+
+
+
+add_executable(scan_docking src/scan_docking.cpp
+        src/pid.cpp src/perception/laserscan_filter.cpp
+        src/perception/optim_circle_solver.cpp src/perception/pcl_circle_fitting.cpp
+        src/perception/pointcloud_detection.cpp
+        src/control/optim_path_planner.cpp
+        src/control/control_utils.cpp
+
+        )
+target_include_directories(scan_docking PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/include  ${CMAKE_CURRENT_SOURCE_DIR}/include/OptimLib ${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen-3.4.0 ${catkin_INCLUDE_DIRS}   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann ${PCL_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} )
+
+
+target_link_libraries(scan_docking PUBLIC  liblua autodiff::autodiff  ${catkin_LIBRARIES}  ${CERES_LIBRARIES}  ${PCL_LIBRARIES} ${PCL_COMMON_LIBRARIES} ${PCL_IO_LIBRARIES} ${PCL_FILTERS_LIBRARIES} ${OCTOMAP_LIBRARIES}
+#        Matplot++::matplot
+        )
+
+set(scan_docking_debug OFF)
+if(scan_docking_debug)
+    set_asan(scan_docking)
+endif()
+
 
 
 # ${Ceres_ROOT}/lib
@@ -314,22 +388,25 @@ install(TARGETS scan_republisher
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
         )
-install(TARGETS scan_matching
+install(TARGETS scan_slam
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+        )
+install(TARGETS scan_docking
         ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
         )
 
-install(TARGETS scan_filter_intensity
-        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-        )
+
+
 
 install(DIRECTORY launch
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
         PATTERN "launch/data" EXCLUDE
         )
 
-set_target_runpath(scan_matching)
+set_target_rpath(scan_slam)
+#set_target_runpath(scan_slam)
 include(CPack)

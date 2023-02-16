@@ -113,7 +113,6 @@ namespace fs = ghc::filesystem;
 #endif
 
 
-#include "icp/Normal2dEstimation.h"
 
 
 #include "ros_tool/RvizInteractiveControlTool.h"
@@ -385,7 +384,6 @@ private:
     perception::PointcloudNormal2dEstimation<pcl::PointXYZ, pcl::search::KdTree<pcl::PointXYZ>> m_norm_est_reading;
 
 
-    Normal2dEstimation m_norm_estim;
 
 
     transform::PoseFilter map_odom_filter;
@@ -444,8 +442,6 @@ public:
         m_refe_radius_outlier_removal.setMinNeighborsInRadius(m_filter_reference_config.radius_rmv_nn);
 
 
-        m_norm_estim.setSearchMethod(m_norm_tree);
-        m_norm_estim.setRadiusSearch(m_norm_est_config.radius);
 
         m_norm_est_reading.setQueryRadius(m_norm_est_config.radius);
 
@@ -739,15 +735,8 @@ public:
                      const pcl::PointXYZ &view_point = pcl::PointXYZ(0.0, 0.0, 0.0)) {
 
         pcl::copyPointCloud(*t_cloud, *t_cloud_norm);
-#if 0
-        m_norm_estim.setInputCloud(t_cloud);
-        m_norm_estim.compute(t_cloud_norm);
-        m_norm_estim.setViewPoint(view_point);
-#endif
-#if 1
         m_norm_est_reading.setInputCloud(t_cloud);
         m_norm_est_reading.compute(t_cloud_norm);
-#endif
     }
 
     void removeReadingShadow(pcl::PointCloud<pcl::PointNormal>::Ptr t_cloud,
